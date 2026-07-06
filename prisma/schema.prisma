@@ -1,0 +1,151 @@
+// Schema Prisma - Rift Party
+// Voir ROADMAP_DATABASE.md a la racine du repo pour le contexte produit.
+// Architecture hybride : l'etat de jeu EN DIRECT reste en memoire (RoomsService
+// et les services de mini-jeux) ; ce schema persiste seulement aux etapes cles
+// (creation de room, fin de manche, connexions, votes tier list) pour survivre
+// aux redemarrages et alimenter de vraies statistiques.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  PLAYER
+}
+
+/// Compte utilisateur. Un seul role utilise pour l'instant (ADMIN, pour la
+/// popup metriques) ; PLAYER est reserve a une phase ulterieure du roadmap
+/// (comptes joueurs, profils, badges) pour ne pas avoir a remodeler la table.
+model User {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  passwordHash String
+  role         UserRole  @default(ADMIN)
+  createdAt    DateTime  @default(now())
+  lastLoginAt  DateTime?
+}
+
+/// Une trace persistee par room creee (pas l'etat live, qui reste en memoire
+/// dans RoomsService). Fermee quand le dernier joueur part.
+model Room {
+  id                String    @id @default(uuid())
+  code              String    @unique
+  createdAt         DateTime  @default(now())
+  closedAt          DateTime?
+  hostPseudoInitial String
+  maxPlayersReached Int       @default(0)
+
+  matches Match[]
+
+  @@index([createdAt])
+}
+
+/// Une Party Mix complete, ou une partie solo hors mix.
+model Match {
+  id          String    @id @default(uuid())
+  roomId      String
+  room        Room      @relation(fields: [roomId], references: [id])
+  playlist    String[]
+  playerCount Int
+  startedAt   DateTime  @default(now())
+  finishedAt  DateTime?
+
+  rounds Round[]
+
+  @@index([roomId])
+}
+
+/// Une manche/segment individuel, generique a tous les mini-jeux (miroir du
+/// RoundResult in-memory de RoomsService).
+model Round {
+  id          String   @id @default(uuid())
+  matchId     String
+  match       Match    @relation(fields: [matchId], references: [id])
+  gameId      String
+  roundNumber Int
+  scores      Json
+  summary     String
+  details     Json?
+  finishedAt  DateTime @default(now())
+
+  @@index([matchId])
+  @@index([gameId])
+}
+
+/// Un placement de tier list soumis par un joueur (tiktok-ranking). Persiste
+/// a la resolution du tribunal (fraudPenalty deja connu a ce moment-la).
+model TiktokVote {
+  id           String   @id @default(uuid())
+  roomCode     String
+  matchId      String?
+  question     String
+  pseudo       String
+  anonId       String?
+  placement    Json
+  fraudPenalty Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  @@index([question])
+  @@index([roomCode])
+}
+
+/// Compteurs communautaires incrementaux : combien de fois un champion a ete
+/// place a un slot donne pour une question donnee, tous lobbies confondus.
+/// Alimente l'affichage "lobby vs communaute" sans agregation a la volee.
+model TiktokGlobalStats {
+  id       String @id @default(uuid())
+  question String
+  slot     Int
+  champion String
+  count    Int    @default(0)
+
+  @@unique([question, slot, champion])
+  @@index([question])
+}
+
+enum ConnectionEventType {
+  CONNECT
+  DISCONNECT
+}
+
+/// Connexions/deconnexions socket, identifiees par un anonId genere cote
+/// client (localStorage) puisqu'il n'y a pas de comptes joueurs.
+model ConnectionEvent {
+  id        String              @id @default(uuid())
+  anonId    String
+  socketId  String
+  roomCode  String?
+  type      ConnectionEventType
+  createdAt DateTime            @default(now())
+
+  @@index([anonId])
+  @@index([createdAt])
+}
+
+enum SessionEventType {
+  GAME_STARTED
+  GAME_COMPLETED
+  GAME_ABANDONED
+}
+
+/// Cycle de vie d'un mini-jeu pour un joueur donne : la table cle pour mesurer
+/// quels mini-jeux retiennent vs font fuir (GAME_ABANDONED = deconnexion en
+/// pleine partie avant d'avoir termine sa manche).
+model SessionEvent {
+  id        String           @id @default(uuid())
+  anonId    String
+  roomCode  String
+  gameId    String
+  type      SessionEventType
+  createdAt DateTime         @default(now())
+
+  @@index([gameId])
+  @@index([anonId])
+  @@index([createdAt])
+}

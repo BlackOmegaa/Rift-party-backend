@@ -17,6 +17,7 @@ const DEFAULT_ROUNDS_BY_GAME: Record<string, number> = {
   'vote-party': 5,
   'last-survivor': 1,
   'qui-suis-je': 1,
+  'croquis': 1,
 };
 
 function defaultSettings(): RoomSettings {

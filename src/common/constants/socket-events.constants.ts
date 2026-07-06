@@ -127,6 +127,20 @@ export const WHOAMI_EVENTS = {
   STATE: 'whoami:state',
 } as const;
 
+export const CROQUIS_EVENTS = {
+  START: 'croquis:start',
+  SUBMIT_DRAWING: 'croquis:submit-drawing',
+  DRAWING_PROGRESS: 'croquis:drawing-progress',
+  GALLERY_ITEM: 'croquis:gallery-item',
+  GUESS: 'croquis:guess',
+  GUESS_PROGRESS: 'croquis:guess-progress',
+  REVEAL: 'croquis:reveal',
+  NEXT: 'croquis:next',
+  RESULTS: 'croquis:results',
+  REQUEST_STATE: 'croquis:request-state',
+  STATE: 'croquis:state',
+} as const;
+
 export const UNDERCOVER_EVENTS = {
   START: 'undercover:start',
   REVEAL: 'undercover:reveal',

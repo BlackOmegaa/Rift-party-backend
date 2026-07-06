@@ -12,6 +12,7 @@ import { LoldleModule } from './loldle/loldle.module';
 import { VotePartyModule } from './vote-party/vote-party.module';
 import { LastSurvivorModule } from './last-survivor/last-survivor.module';
 import { WhoamiModule } from './whoami/whoami.module';
+import { CroquisModule } from './croquis/croquis.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { PersistenceModule } from './persistence/persistence.module';
 import { AdminAuthModule } from './admin-auth/admin-auth.module';
@@ -37,6 +38,7 @@ import { AdminMetricsModule } from './admin-metrics/admin-metrics.module';
     VotePartyModule,
     LastSurvivorModule,
     WhoamiModule,
+    CroquisModule,
     PersistenceModule,
     AdminAuthModule,
     AdminMetricsModule,

@@ -19,6 +19,9 @@ import { PrismaModule } from './prisma/prisma.module';
 import { PersistenceModule } from './persistence/persistence.module';
 import { AdminAuthModule } from './admin-auth/admin-auth.module';
 import { AdminMetricsModule } from './admin-metrics/admin-metrics.module';
+import { EntitlementModule } from './entitlement/entitlement.module';
+import { PlayerAuthModule } from './player-auth/player-auth.module';
+import { BillingModule } from './billing/billing.module';
 
 @Module({
   imports: [
@@ -34,6 +37,7 @@ import { AdminMetricsModule } from './admin-metrics/admin-metrics.module';
     // route /admin/login a sa propre limite plus stricte via @Throttle.
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 60 }]),
     PrismaModule,
+    EntitlementModule,
     RoomsModule,
     GamesModule,
     DraftModule,
@@ -48,6 +52,8 @@ import { AdminMetricsModule } from './admin-metrics/admin-metrics.module';
     PersistenceModule,
     AdminAuthModule,
     AdminMetricsModule,
+    PlayerAuthModule,
+    BillingModule,
   ],
   controllers: [AppController],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],

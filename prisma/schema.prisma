@@ -19,9 +19,9 @@ enum UserRole {
   PLAYER
 }
 
-/// Compte utilisateur. Un seul role utilise pour l'instant (ADMIN, pour la
-/// popup metriques) ; PLAYER est reserve a une phase ulterieure du roadmap
-/// (comptes joueurs, profils, badges) pour ne pas avoir a remodeler la table.
+/// Compte utilisateur. Deux roles : ADMIN (popup metriques) et PLAYER (compte
+/// joueur optionnel, sert uniquement a porter un abonnement a travers les
+/// sessions - jamais requis pour jouer, l'anonId reste le mode par defaut).
 model User {
   id           String    @id @default(uuid())
   email        String    @unique
@@ -29,6 +29,28 @@ model User {
   role         UserRole  @default(ADMIN)
   createdAt    DateTime  @default(now())
   lastLoginAt  DateTime?
+
+  subscriptions Subscription[]
+}
+
+/// Un abonnement Stripe (une ligne par cycle de vie d'abonnement Stripe, donc
+/// l'historique est conserve). Le service prend toujours la plus recente par
+/// userId pour determiner le statut actif. `status` reflete tel quel le champ
+/// Stripe (active/trialing/past_due/canceled/...), pas d'enum pour rester
+/// souple face aux valeurs Stripe qui peuvent evoluer.
+model Subscription {
+  id                   String    @id @default(uuid())
+  userId               String
+  user                 User      @relation(fields: [userId], references: [id])
+  stripeCustomerId     String
+  stripeSubscriptionId String    @unique
+  status               String
+  currentPeriodEnd     DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  @@index([userId])
+  @@index([stripeCustomerId])
 }
 
 /// Une trace persistee par room creee (pas l'etat live, qui reste en memoire

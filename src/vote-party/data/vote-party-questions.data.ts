@@ -103,4 +103,18 @@ export const VOTE_PARTY_QUESTIONS: string[] = [
 	"Qui a le plus de comptes smurfs actifs en meme temps ?",
 	"Qui prefere perdre avec sa main plutot que gagner avec un counter pick ?",
 	"Qui a deja invente une excuse absurde pour justifier un feed monstre ?",
+
+	// Piquantes et osees, esprit soiree entre amis (jamais de plateforme/marque nommee)
+	"Qui aurait la vie amoureuse la plus chaotique du groupe ?",
+	"Qui aurait le plus de messages a supprimer avant que quelqu'un touche a son telephone ?",
+	"Qui ferait le meilleur strip poker mais le pire perdant ?",
+	"Qui a deja envoye un message au mauvais destinataire et failli mourir de honte ?",
+	"Qui aurait le plus de mal a expliquer son historique de recherche a sa mere ?",
+	"Qui craquerait en premier dans un jeu de verite ou action ?",
+	"Qui a la vie la plus sulfureuse mais le visage le plus innocent ?",
+	"Qui ferait le plus de dommages collateraux en jouant les entremetteurs ?",
+	"Qui a deja fait style d'avoir une connexion coupee pour eviter une conversation genante ?",
+	"Qui garderait un secret croustillant le moins longtemps possible ?",
+	"Qui serait le pire choix pour garder un secret d'ivresse ?",
+	"Qui a le plus de chances de finir la soiree avec une histoire a ne jamais raconter aux parents ?",
 ];

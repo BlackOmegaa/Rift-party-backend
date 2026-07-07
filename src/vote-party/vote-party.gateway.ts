@@ -11,6 +11,7 @@ import { Server, Socket } from 'socket.io';
 import { VotePartyService } from './vote-party.service';
 import { RoomsService } from '../rooms/rooms.service';
 import { ROOM_EVENTS, VOTE_PARTY_EVENTS } from '../common/constants/socket-events.constants';
+import { PERSISTENCE_EVENTS } from '../common/constants/internal-events.constants';
 
 const GAME_ID = 'vote-party';
 const DEFAULT_ROUNDS = 5;
@@ -58,6 +59,13 @@ export class VotePartyGateway {
     if (check?.allVoted) this.revealRound(payload.roomCode);
   }
 
+  @OnEvent(PERSISTENCE_EVENTS.ROOM_CLOSED)
+  handleRoomClosed(payload: { roomCode: string }) {
+    // Le dernier joueur parti n'emet pas `room.player-left` : sans ce nettoyage,
+    // la session (et son timer arme) survivrait a la fermeture de la room.
+    this.votePartyService.clearRoom(payload.roomCode);
+  }
+
   @SubscribeMessage(VOTE_PARTY_EVENTS.REQUEST_STATE)
   handleRequestState(@ConnectedSocket() client: Socket) {
     const room = this.roomsService.getRoomBySocket(client.id);
@@ -92,19 +100,26 @@ export class VotePartyGateway {
     const room = this.roomsService.getRoomBySocket(client.id);
     if (!room || room.hostId !== client.id) return;
     try {
-      if (this.votePartyService.isLastRound(room.code)) {
-        this.finishGame(room.code);
-        return;
-      }
-      const info = this.votePartyService.nextRound(
-        room.code,
-        room.settings.roundTimeSec,
-        (code) => this.handleTimeout(code),
-      );
-      this.server.to(room.code).emit(VOTE_PARTY_EVENTS.QUESTION, info);
+      this.advanceRound(room.code);
     } catch (err) {
       client.emit(ROOM_EVENTS.ERROR, { message: (err as Error).message });
     }
+  }
+
+  /** Avance apres le reveal (host ou filet de securite) : question suivante ou fin de partie. */
+  private advanceRound(roomCode: string) {
+    if (this.votePartyService.isLastRound(roomCode)) {
+      this.finishGame(roomCode);
+      return;
+    }
+    const room = this.roomsService.getRoom(roomCode);
+    if (!room) return;
+    const info = this.votePartyService.nextRound(
+      roomCode,
+      room.settings.roundTimeSec,
+      (code) => this.handleTimeout(code),
+    );
+    this.server.to(roomCode).emit(VOTE_PARTY_EVENTS.QUESTION, info);
   }
 
   /** Temps ecoule pendant le vote : les retardataires sont comptes en abstention et la manche est revelee. */
@@ -113,8 +128,14 @@ export class VotePartyGateway {
     this.revealRound(roomCode);
   }
 
+  /** Filet de securite : l'host n'a pas avance le reveal a temps, le serveur avance a sa place. */
+  private handleRevealTimeout(roomCode: string) {
+    if (this.votePartyService.phaseOf(roomCode) !== 'reveal') return;
+    this.advanceRound(roomCode);
+  }
+
   private revealRound(roomCode: string) {
-    const result = this.votePartyService.revealRound(roomCode);
+    const result = this.votePartyService.revealRound(roomCode, (code) => this.handleRevealTimeout(code));
     this.server.to(roomCode).emit(VOTE_PARTY_EVENTS.ROUND_RESULT, result);
   }
 

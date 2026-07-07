@@ -11,6 +11,7 @@ import { Server, Socket } from 'socket.io';
 import { LoldleService } from './loldle.service';
 import { RoomsService } from '../rooms/rooms.service';
 import { LOLDLE_EVENTS, ROOM_EVENTS } from '../common/constants/socket-events.constants';
+import { PERSISTENCE_EVENTS } from '../common/constants/internal-events.constants';
 
 const GAME_ID = 'loldle';
 
@@ -41,6 +42,21 @@ export class LoldleGateway {
       room.settings.loldleWordLength,
     );
     this.server.to(payload.roomCode).emit(LOLDLE_EVENTS.START, info);
+  }
+
+  @OnEvent('room.player-left')
+  handlePlayerLeft(payload: { roomCode: string; playerId: string }) {
+    // La grille du partant est marquee terminee : si tous les restants ont
+    // deja fini, on declenche le finish anticipe au lieu d'attendre le timer.
+    const check = this.loldleService.removePlayer(payload.roomCode, payload.playerId);
+    if (check?.allDone) this.finishGame(payload.roomCode);
+  }
+
+  @OnEvent(PERSISTENCE_EVENTS.ROOM_CLOSED)
+  handleRoomClosed(payload: { roomCode: string }) {
+    // Room supprimee en pleine manche : stoppe le timer dur et libere la
+    // session orpheline (computeResults ne sera jamais appele).
+    this.loldleService.clearSession(payload.roomCode);
   }
 
   @SubscribeMessage(LOLDLE_EVENTS.REQUEST_STATE)

@@ -10,6 +10,8 @@ import {
 
 const MAJORITY_POINTS = 10;
 const ELECTED_BONUS = 5;
+/** Filet de securite : si l'host ne fait pas avancer le reveal, le serveur avance tout seul. */
+const REVEAL_SAFETY_TIME_SEC = 90;
 
 interface VotePartySession {
 	roomCode: string;
@@ -111,7 +113,7 @@ export class VotePartyService {
 	}
 
 	/** Cloture la manche : abstention forcee pour les votes manquants, calcule le tally et les points. */
-	revealRound(roomCode: string): VotePartyRoundResult {
+	revealRound(roomCode: string, onRevealTimeout: (roomCode: string) => void): VotePartyRoundResult {
 		const session = this.sessions.get(roomCode);
 		if (!session) throw new Error('Aucune partie Vote Party en cours dans cette room.');
 		if (session.phaseTimeout) clearTimeout(session.phaseTimeout);
@@ -162,6 +164,9 @@ export class VotePartyService {
 			totalScores: { ...session.totalScores },
 		};
 		session.lastRound = result;
+		// Filet de securite : le reveal n'est avance que par l'host ; si son client
+		// ne suit plus, le serveur avance a sa place au bout du delai.
+		session.phaseTimeout = setTimeout(() => onRevealTimeout(roomCode), REVEAL_SAFETY_TIME_SEC * 1000);
 		return result;
 	}
 
@@ -181,6 +186,7 @@ export class VotePartyService {
 			throw new Error('La manche en cours ne peut pas encore etre passee.');
 		}
 		if (this.isLastRound(roomCode)) throw new Error('Toutes les questions sont deja passees.');
+		if (session.phaseTimeout) clearTimeout(session.phaseTimeout);
 
 		session.roundIndex += 1;
 		session.phase = 'voting';
@@ -220,6 +226,12 @@ export class VotePartyService {
 		if (!session) return undefined;
 		session.players = session.players.filter((p) => p.id !== playerId);
 		session.votes.delete(playerId);
+		// Les votes qui ciblaient le partant deviennent des abstentions (meme
+		// representation que le timeout : null) pour ne pas elire un absent,
+		// sans rendre la main aux votants (leur vote reste enregistre).
+		for (const [voterId, targetId] of session.votes.entries()) {
+			if (targetId === playerId) session.votes.set(voterId, null);
+		}
 		if (session.phase !== 'voting') return { allVoted: false };
 		return { allVoted: session.players.length > 0 && this.voteProgress(session).allVoted };
 	}
@@ -255,6 +267,12 @@ export class VotePartyService {
 			lastRound: session.phase === 'reveal' ? session.lastRound : null,
 			results: null,
 		};
+	}
+
+	/** Nettoyage complet a la fermeture de la room : timers + session + dernier resultat. */
+	clearRoom(roomCode: string): void {
+		this.clearSession(roomCode);
+		this.lastResults.delete(roomCode);
 	}
 
 	private voteProgress(session: VotePartySession): { votedCount: number; expectedCount: number; allVoted: boolean } {

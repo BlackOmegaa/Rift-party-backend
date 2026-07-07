@@ -184,6 +184,69 @@ export class BrumeService {
     };
   }
 
+  /**
+   * Retire un joueur parti (deconnexion ou leave volontaire) de toutes les
+   * structures de la session. Renvoie undefined si le joueur n'etait pas dans
+   * la manche, sinon ce que le gateway doit declencher : rien (empty inclus,
+   * la session a deja ete nettoyee), une victoire de faction, ou le depart de
+   * la nuit si le reveal vient d'etre debloque.
+   */
+  removePlayer(
+    roomCode: string,
+    playerId: string,
+  ): { empty: boolean; victory: BrumeResult['winner'] | null; allReadyForNight: boolean } | undefined {
+    const session = this.sessions.get(roomCode);
+    if (!session) return undefined;
+    const idx = session.players.findIndex((p) => p.id === playerId);
+    if (idx === -1) return undefined;
+
+    session.players.splice(idx, 1);
+    session.roles.delete(playerId);
+    session.alive.delete(playerId);
+    session.readyPlayerIds.delete(playerId);
+    session.silencedForDay.delete(playerId);
+    session.mvpBonus.delete(playerId);
+    session.night.submittedPlayerIds.delete(playerId);
+    session.night.poroVotes.delete(playerId);
+    session.votes.delete(playerId);
+    // Les votes qui ciblaient le partant ne doivent pas eliminer un absent.
+    for (const [voterId, targetId] of [...session.votes.entries()]) {
+      if (targetId === playerId) session.votes.delete(voterId);
+    }
+    // La Marque de Kindred est perdue si sa proie quitte la partie.
+    if (session.kindredMarqueId === playerId) {
+      session.kindredMarqueId = null;
+      session.kindredHuntStreak = 0;
+    }
+
+    if (!session.players.length) {
+      this.clearSession(roomCode);
+      return { empty: true, victory: null, allReadyForNight: false };
+    }
+
+    // Le depart peut donner la victoire a une faction (ex: dernier predateur parti).
+    const victory = this.checkFactionVictory(session);
+    if (victory) return { empty: false, victory, allReadyForNight: false };
+
+    // Phase reveal : le partant etait peut-etre le dernier "pas encore pret".
+    const allReadyForNight =
+      session.phase === 'reveal' && session.readyPlayerIds.size >= session.players.length;
+    return { empty: false, victory: null, allReadyForNight };
+  }
+
+  /**
+   * Cleanup d'une session orpheline (room fermee ou videe de ses joueurs) :
+   * clear du timeout de phase (sinon la boucle nuit/jour/vote se re-arme pour
+   * toujours) + suppression des Maps, SANS calcul de resultats (contrairement
+   * a computeResults, le chemin normal de fin de manche).
+   */
+  clearSession(roomCode: string) {
+    const session = this.sessions.get(roomCode);
+    if (session?.phaseTimeout) clearTimeout(session.phaseTimeout);
+    this.sessions.delete(roomCode);
+    this.lastResults.delete(roomCode);
+  }
+
   beginNight(
     roomCode: string,
     onTimeout: (roomCode: string) => void,

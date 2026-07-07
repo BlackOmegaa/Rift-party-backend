@@ -417,4 +417,10 @@ export class WhoamiService {
 		if (existing?.phaseTimeout) clearTimeout(existing.phaseTimeout);
 		this.sessions.delete(roomCode);
 	}
+
+	/** Nettoyage a la fermeture definitive de la room (voir WhoamiGateway sur ROOM_CLOSED) : sans lui, une session abandonnee et son timer restent en memoire pour toujours. */
+	clearRoom(roomCode: string): void {
+		this.clearSession(roomCode);
+		this.lastResults.delete(roomCode);
+	}
 }

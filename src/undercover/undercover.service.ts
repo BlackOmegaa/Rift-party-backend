@@ -21,6 +21,8 @@ interface UndercoverSession {
   turnOrder: UndercoverPlayerRef[];
   phase: UndercoverPhase;
   readyPlayerIds: Set<string>;
+  /** Joueurs partis en cours de manche : exclus des quorums (reveal, vote) et leurs tours sont sautes immediatement. Ils restent dans turnOrder (roles, mots deja poses, cible de vote valide). */
+  departedIds: Set<string>;
   turnIndex: number;
   currentDeadline?: number;
   words: UndercoverTurnEntry[];
@@ -62,6 +64,7 @@ export class UndercoverService {
       turnOrder,
       phase: 'reveal',
       readyPlayerIds: new Set(),
+      departedIds: new Set(),
       turnIndex: 0,
       words: [],
       votes: new Map(),
@@ -147,15 +150,69 @@ export class UndercoverService {
     if (!session || session.phase !== 'reveal') return false;
     if (!session.turnOrder.some((p) => p.id === playerId)) return false;
     session.readyPlayerIds.add(playerId);
-    return session.readyPlayerIds.size >= session.turnOrder.length;
+    return this.isRevealCompleteInternal(session);
+  }
+
+  /**
+   * Depart d'un joueur en cours de manche : marque parti (ses tours seront
+   * sautes, il ne compte plus dans les quorums) et purge son vote eventuel
+   * pour qu'un absent ne pese pas dans computeResults.
+   */
+  markDeparted(roomCode: string, playerId: string): void {
+    const session = this.sessions.get(roomCode);
+    if (!session) return;
+    session.departedIds.add(playerId);
+    session.votes.delete(playerId);
+  }
+
+  isDeparted(roomCode: string, playerId: string): boolean {
+    return this.sessions.get(roomCode)?.departedIds.has(playerId) ?? false;
+  }
+
+  /** Vrai si tous les joueurs de la manche encore presents ont valide le reveal. Permet de re-tester le quorum quand un joueur part (markReady n'est appele que sur clic). */
+  isRevealComplete(roomCode: string): boolean {
+    const session = this.sessions.get(roomCode);
+    if (!session || session.phase !== 'reveal') return false;
+    return this.isRevealCompleteInternal(session);
+  }
+
+  private isRevealCompleteInternal(session: UndercoverSession): boolean {
+    const expected = session.turnOrder.filter(
+      (p) => !session.departedIds.has(p.id),
+    );
+    return (
+      expected.length > 0 &&
+      expected.every((p) => session.readyPlayerIds.has(p.id))
+    );
+  }
+
+  /** Id du joueur dont c'est le tour, ou undefined hors phase de tours. */
+  currentTurnPlayerId(roomCode: string): string | undefined {
+    const session = this.sessions.get(roomCode);
+    if (!session || (session.phase !== 'turn1' && session.phase !== 'turn2')) {
+      return undefined;
+    }
+    return session.turnOrder[session.turnIndex]?.id;
   }
 
   revealProgress(roomCode: string): { ready: number; total: number } {
     const session = this.sessions.get(roomCode);
     return {
       ready: session?.readyPlayerIds.size ?? 0,
-      total: session?.turnOrder.length ?? 0,
+      // Les partis ne sont plus attendus : le compteur "X/Y prets" du front
+      // doit refleter le quorum reel, pas le roster du debut de manche.
+      total: session
+        ? session.turnOrder.filter((p) => !session.departedIds.has(p.id)).length
+        : 0,
     };
+  }
+
+  /** Nettoyage a la fermeture definitive de la room : sans lui, une session abandonnee (et son eventuel timer de tour) resterait en memoire pour toujours. */
+  clearSession(roomCode: string): void {
+    const session = this.sessions.get(roomCode);
+    if (session?.turnTimeout) clearTimeout(session.turnTimeout);
+    this.sessions.delete(roomCode);
+    this.lastResults.delete(roomCode);
   }
 
   beginTurns(
@@ -197,7 +254,9 @@ export class UndercoverService {
     if (!player || player.id !== playerId) {
       throw new Error("Ce n'est pas ton tour.");
     }
-    const trimmed = word.trim();
+    // Borne de securite : le payload socket n'est pas valide par DTO, un mot
+    // demesurement long serait stocke puis rediffuse a toute la room.
+    const trimmed = word.trim().slice(0, 40);
     if (!trimmed) throw new Error('Le mot ne peut pas etre vide.');
 
     const round: 1 | 2 = session.phase === 'turn1' ? 1 : 2;

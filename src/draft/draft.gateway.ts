@@ -10,7 +10,9 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { Server, Socket } from 'socket.io';
 import { DraftService } from './draft.service';
 import { RoomsService } from '../rooms/rooms.service';
+import { Room } from '../rooms/interfaces/room.interface';
 import { DRAFT_EVENTS, ROOM_EVENTS } from '../common/constants/socket-events.constants';
+import { PERSISTENCE_EVENTS } from '../common/constants/internal-events.constants';
 import { StrategySelections } from './interfaces/draft.interface';
 import { ForcedDraftEvent } from './draft.service';
 
@@ -113,6 +115,44 @@ export class DraftGateway {
     this.server.to(payload.playerId).emit(DRAFT_EVENTS.START, state);
   }
 
+  /**
+   * Un joueur parti ne soumettra jamais : sans ce rattrapage, le mode simple
+   * resterait bloque sur "en attente" et un bracket de tournoi attendrait son
+   * pick pour toujours. Sa soumission deja faite, le cas echeant, reste
+   * valable (comportement existant conserve).
+   */
+  @OnEvent('room.player-left')
+  handlePlayerLeft(payload: { roomCode: string; playerId: string }) {
+    if (!this.draftService.hasSession(payload.roomCode)) return;
+    const room = this.roomsService.getRoom(payload.roomCode);
+    if (!room) return;
+
+    if (this.draftService.isTournament(payload.roomCode)) {
+      // Marque le partant forfait pour ses matchs non soumis (ce round et les
+      // suivants) puis relance la resolution par le meme chemin qu'une
+      // soumission (reveal, bracket, avancement de round compris).
+      this.draftService.markPlayerDeparted(payload.roomCode, payload.playerId);
+      this.handleTournamentSubmit(payload.roomCode);
+      return;
+    }
+
+    this.tryFinishSingle(room);
+  }
+
+  @OnEvent(PERSISTENCE_EVENTS.ROOM_CLOSED)
+  handleRoomClosed(payload: { roomCode: string }) {
+    // Le dernier joueur parti n'emet pas `room.player-left` : sans ce
+    // nettoyage, la session draft et les timeouts de reveal armes (20s)
+    // survivraient a la fermeture de la room.
+    const prefix = `${payload.roomCode}:`;
+    for (const [key, pending] of this.pendingReveals) {
+      if (!key.startsWith(prefix)) continue;
+      clearTimeout(pending.timeout);
+      this.pendingReveals.delete(key);
+    }
+    this.draftService.clearRoom(payload.roomCode);
+  }
+
   @SubscribeMessage(DRAFT_EVENTS.SUBMIT)
   handleSubmit(
     @ConnectedSocket() client: Socket,
@@ -144,27 +184,44 @@ export class DraftGateway {
         return;
       }
 
-      const activePlayerIds = room.players.map((p) => p.id);
-      if (this.draftService.allSubmitted(room.code, activePlayerIds)) {
-        const { results } = this.draftService.computeResults(room.code);
-        const duelists = results.filter((r) => r.scenario).map((r) => r.playerId);
-        this.armReveal(room.code, 'single', duelists.length ? duelists : results.map((r) => r.playerId));
-        this.server.to(room.code).emit(DRAFT_EVENTS.RESULTS, { results });
-
-        const scores = this.draftService.toRoundScoresSingle(results);
-        const winner = results.find((r) => r.isWinner);
-        const winnerPseudo = winner
-          ? (room.players.find((p) => p.id === winner.playerId)?.pseudo ?? 'Un joueur')
-          : null;
-        this.finishRound(room.code, {
-          gameId: GAME_ID,
-          scores,
-          summary: winnerPseudo ? `${winnerPseudo} remporte la draft.` : 'Draft terminee.',
-        });
-      }
+      this.tryFinishSingle(room);
     } catch (err) {
       client.emit(ROOM_EVENTS.ERROR, { message: (err as Error).message });
     }
+  }
+
+  /**
+   * Mode simple : si tous les participants encore connectes ont soumis,
+   * calcule et diffuse les resultats. Appele apres chaque soumission ET apres
+   * chaque depart (le partant etait peut-etre le dernier attendu).
+   */
+  private tryFinishSingle(room: Room) {
+    const activePlayerIds = room.players.map((p) => p.id);
+    if (!this.draftService.allSubmitted(room.code, activePlayerIds)) return;
+
+    const { results } = this.draftService.computeResults(room.code);
+    const duelists = results.filter((r) => r.scenario).map((r) => r.playerId);
+    // On n'attend le MATCH_SEEN que des joueurs encore connectes : un joueur
+    // parti apres avoir soumis ne le signalera jamais (sinon 20s de timeout).
+    const connectedIds = new Set(activePlayerIds);
+    const requiredIds = (duelists.length ? duelists : results.map((r) => r.playerId)).filter((id) =>
+      connectedIds.has(id),
+    );
+    if (requiredIds.length) this.armReveal(room.code, 'single', requiredIds);
+    this.server.to(room.code).emit(DRAFT_EVENTS.RESULTS, { results });
+    // Duel entierement deserte : personne n'enverra MATCH_SEEN, reveal immediat.
+    if (!requiredIds.length) this.revealMatch(room.code, 'single');
+
+    const scores = this.draftService.toRoundScoresSingle(results);
+    const winner = results.find((r) => r.isWinner);
+    const winnerPseudo = winner
+      ? (room.players.find((p) => p.id === winner.playerId)?.pseudo ?? 'Un joueur')
+      : null;
+    this.finishRound(room.code, {
+      gameId: GAME_ID,
+      scores,
+      summary: winnerPseudo ? `${winnerPseudo} remporte la draft.` : 'Draft terminee.',
+    });
   }
 
   /**
@@ -213,11 +270,19 @@ export class DraftGateway {
     const { resolvedMatches, roundJustCompleted, tournamentFinished } =
       this.draftService.tryResolveRound(roomCode);
 
+    const connectedIds = new Set(
+      (this.roomsService.getRoom(roomCode)?.players ?? []).map((p) => p.id),
+    );
     for (const match of resolvedMatches) {
       const key = `${match.round}-${match.matchIndex}`;
-      const requiredIds = match.isCloneMatch ? [match.playerAId] : [match.playerAId, match.playerBId];
-      this.armReveal(roomCode, key, requiredIds);
+      const duelists = match.isCloneMatch ? [match.playerAId] : [match.playerAId, match.playerBId];
+      // On n'attend le MATCH_SEEN que des duellistes encore connectes : un
+      // joueur parti (forfait) ne le signalera jamais (sinon 20s de timeout).
+      const requiredIds = duelists.filter((id) => connectedIds.has(id));
+      if (requiredIds.length) this.armReveal(roomCode, key, requiredIds);
       this.server.to(roomCode).emit(DRAFT_EVENTS.MATCH_RESOLVED, match);
+      // Duel entierement deserte : personne n'enverra MATCH_SEEN, reveal immediat.
+      if (!requiredIds.length) this.revealMatch(roomCode, key);
     }
     if (resolvedMatches.length) this.broadcastBracketState(roomCode);
 

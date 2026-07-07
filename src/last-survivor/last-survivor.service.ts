@@ -12,6 +12,8 @@ import {
 } from './interfaces/last-survivor.interface';
 
 const MAJORITY_POINTS = 10;
+/** Filet de securite : si l'host ne fait pas avancer le reveal, le serveur avance tout seul. */
+const REVEAL_SAFETY_TIME_SEC = 90;
 
 interface LastSurvivorSession {
 	roomCode: string;
@@ -114,7 +116,7 @@ export class LastSurvivorService {
 	}
 
 	/** Cloture la manche : abstention forcee pour les votes manquants, elimine le plus vote (tirage au sort entre ex aequo). */
-	revealRound(roomCode: string): LastSurvivorRoundResult {
+	revealRound(roomCode: string, onRevealTimeout: (roomCode: string) => void): LastSurvivorRoundResult {
 		const session = this.sessions.get(roomCode);
 		if (!session) throw new Error('Aucune partie Last Survivor en cours dans cette room.');
 		if (session.phaseTimeout) clearTimeout(session.phaseTimeout);
@@ -169,6 +171,9 @@ export class LastSurvivorService {
 			totalScores: { ...session.totalScores },
 		};
 		session.lastRound = result;
+		// Filet de securite : le reveal n'est avance que par l'host ; si son client
+		// ne suit plus, le serveur avance a sa place au bout du delai.
+		session.phaseTimeout = setTimeout(() => onRevealTimeout(roomCode), REVEAL_SAFETY_TIME_SEC * 1000);
 		return result;
 	}
 
@@ -188,6 +193,7 @@ export class LastSurvivorService {
 			throw new Error('La manche en cours ne peut pas encore etre passee.');
 		}
 		if (this.isFinished(roomCode)) throw new Error('Le tournoi est deja termine.');
+		if (session.phaseTimeout) clearTimeout(session.phaseTimeout);
 
 		session.roundNumber += 1;
 		session.phase = 'voting';
@@ -270,6 +276,12 @@ export class LastSurvivorService {
 			lastRound: session.phase === 'reveal' ? session.lastRound : null,
 			results: null,
 		};
+	}
+
+	/** Nettoyage complet a la fermeture de la room : timers + session + dernier resultat. */
+	clearRoom(roomCode: string): void {
+		this.clearSession(roomCode);
+		this.lastResults.delete(roomCode);
 	}
 
 	private voteProgress(session: LastSurvivorSession): { votedCount: number; expectedCount: number; allVoted: boolean } {

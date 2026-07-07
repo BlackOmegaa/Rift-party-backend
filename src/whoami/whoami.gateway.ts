@@ -11,6 +11,7 @@ import { Server, Socket } from 'socket.io';
 import { WhoamiService } from './whoami.service';
 import { RoomsService } from '../rooms/rooms.service';
 import { ROOM_EVENTS, WHOAMI_EVENTS } from '../common/constants/socket-events.constants';
+import { PERSISTENCE_EVENTS } from '../common/constants/internal-events.constants';
 import { WhoamiTurnState } from './interfaces/whoami.interface';
 
 const GAME_ID = 'qui-suis-je';
@@ -55,6 +56,12 @@ export class WhoamiGateway {
     this.applyOutcome(payload.roomCode, outcome);
     // La liste des cibles a change pour tout le monde.
     if (this.whoamiService.hasSession(payload.roomCode)) this.emitPersonalizedState(payload.roomCode);
+  }
+
+  /** Room fermee definitivement : purge session + timer, sinon une manche abandonnee reste en memoire pour toujours. */
+  @OnEvent(PERSISTENCE_EVENTS.ROOM_CLOSED)
+  handleRoomClosed(payload: { roomCode: string }) {
+    this.whoamiService.clearRoom(payload.roomCode);
   }
 
   @SubscribeMessage(WHOAMI_EVENTS.REQUEST_STATE)

@@ -149,6 +149,34 @@ export class LoldleService {
     return { row, feedEntry, allDone };
   }
 
+  /**
+   * Marque la grille d'un joueur parti (deconnexion ou leave volontaire) comme
+   * terminee : le finish anticipe "allDone" ne doit plus attendre un absent.
+   * Renvoie undefined si rien n'a change (pas de manche, joueur inconnu ou
+   * grille deja finie).
+   */
+  removePlayer(roomCode: string, playerId: string): { allDone: boolean } | undefined {
+    const session = this.sessions.get(roomCode);
+    if (!session || session.phase !== 'guessing') return undefined;
+    const state = session.playerStates.get(playerId);
+    if (!state || state.done) return undefined;
+    state.done = true;
+    const allDone = [...session.playerStates.values()].every((s) => s.done);
+    return { allDone };
+  }
+
+  /**
+   * Cleanup d'une session orpheline (room fermee en pleine manche) : clear du
+   * timer dur + suppression des Maps, SANS calcul de resultats (contrairement
+   * a computeResults, le chemin normal de fin de manche).
+   */
+  clearSession(roomCode: string) {
+    const session = this.sessions.get(roomCode);
+    if (session?.phaseTimeout) clearTimeout(session.phaseTimeout);
+    this.sessions.delete(roomCode);
+    this.lastResults.delete(roomCode);
+  }
+
   getSnapshot(roomCode: string, playerId: string): LoldleSnapshot {
     const session = this.sessions.get(roomCode);
     if (!session) {

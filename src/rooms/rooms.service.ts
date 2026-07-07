@@ -48,6 +48,11 @@ export class RoomsService {
   private socketToRoom = new Map<string, string>();
 
   createRoom(hostSocketId: string, pseudo: string, isSubscriber = false): Room {
+    // Plafond de securite memoire (l'etat est en RAM) : jamais atteint en usage
+    // normal, ne sert qu'a borner un abus qui passerait le rate-limit par socket.
+    if (this.rooms.size >= 5000) {
+      throw new Error('Trop de rooms actives en ce moment, reessaie dans un instant.');
+    }
     let code = generateRoomCode();
     while (this.rooms.has(code)) {
       code = generateRoomCode();
@@ -194,12 +199,16 @@ export class RoomsService {
     if (!room) throw new Error('Tu n\'es dans aucune room.');
     if (room.hostId !== socketId) throw new Error('Seul l\'host peut changer les reglages.');
 
-    if (patch.roundTimeSec !== undefined) {
+    // Payload socket non valide par DTO : on ignore silencieusement les valeurs
+    // non numeriques (NaN se propagerait dans tous les timers de manche) et on
+    // borne le nombre de cles pour ne pas laisser grossir la Map arbitrairement.
+    if (patch.roundTimeSec !== undefined && Number.isFinite(patch.roundTimeSec)) {
       room.settings.roundTimeSec = Math.max(15, Math.min(90, Math.round(patch.roundTimeSec)));
     }
     if (patch.roundsByGame) {
-      for (const [gameId, rounds] of Object.entries(patch.roundsByGame)) {
-        room.settings.roundsByGame[gameId] = Math.max(1, Math.min(30, Math.round(rounds)));
+      for (const [gameId, rounds] of Object.entries(patch.roundsByGame).slice(0, 40)) {
+        if (typeof rounds !== 'number' || !Number.isFinite(rounds)) continue;
+        room.settings.roundsByGame[gameId.slice(0, 40)] = Math.max(1, Math.min(30, Math.round(rounds)));
       }
     }
     if (patch.loldleWordLength !== undefined) {

@@ -11,6 +11,7 @@ import { Server, Socket } from 'socket.io';
 import { BrumeService } from './brume.service';
 import { RoomsService } from '../rooms/rooms.service';
 import { BRUME_EVENTS, ROOM_EVENTS } from '../common/constants/socket-events.constants';
+import { PERSISTENCE_EVENTS } from '../common/constants/internal-events.constants';
 import {
   BrumeChatChannel,
   BrumeNightActionType,
@@ -46,6 +47,50 @@ export class BrumeGateway {
       const rolePayload = this.brumeService.getRolePayload(payload.roomCode, player.id);
       if (rolePayload) this.server.to(player.id).emit(BRUME_EVENTS.REVEAL, rolePayload);
     }
+  }
+
+  @OnEvent('room.player-left')
+  handlePlayerLeft(payload: { roomCode: string; playerId: string }) {
+    const outcome = this.brumeService.removePlayer(payload.roomCode, payload.playerId);
+    if (!outcome || outcome.empty) return;
+
+    if (outcome.victory) {
+      // Le depart peut donner la victoire a une faction (ex: dernier predateur
+      // parti) : meme chemin de fin que la resolution normale (les timeouts de
+      // phase sont clear dans computeResults).
+      this.finishGame(payload.roomCode, outcome.victory);
+      return;
+    }
+
+    const phase = this.brumeService.phaseOf(payload.roomCode);
+    if (phase === 'reveal') {
+      // Meme chemin que handleRevealReady : progression, puis nuit si le
+      // partant etait le dernier "pas encore pret".
+      this.server
+        .to(payload.roomCode)
+        .emit(BRUME_EVENTS.REVEAL_PROGRESS, this.brumeService.revealProgress(payload.roomCode));
+      if (outcome.allReadyForNight) this.startNight(payload.roomCode);
+      return;
+    }
+
+    // Les compteurs d'attente ne guettent plus le partant : re-broadcast.
+    if (phase === 'night') {
+      this.server
+        .to(payload.roomCode)
+        .emit(BRUME_EVENTS.NIGHT_PROGRESS, this.brumeService.nightProgress(payload.roomCode));
+    } else if (phase === 'vote') {
+      this.server
+        .to(payload.roomCode)
+        .emit(BRUME_EVENTS.VOTE_PROGRESS, this.brumeService.getVoteProgress(payload.roomCode));
+    }
+    this.pushPrivateResync(payload.roomCode);
+  }
+
+  @OnEvent(PERSISTENCE_EVENTS.ROOM_CLOSED)
+  handleRoomClosed(payload: { roomCode: string }) {
+    // Room supprimee en pleine partie : stoppe la boucle nuit/jour/vote et
+    // libere la session orpheline (computeResults ne sera jamais appele).
+    this.brumeService.clearSession(payload.roomCode);
   }
 
   @SubscribeMessage(BRUME_EVENTS.REQUEST_STATE)

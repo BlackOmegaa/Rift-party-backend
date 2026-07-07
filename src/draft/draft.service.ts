@@ -91,6 +91,13 @@ interface TournamentSession {
   currentRound: number;
   /** playerId (reel) -> soumission de CE round. Reinitialise a chaque nouveau round. */
   roundSubmissions: Map<string, DraftSubmission>;
+  /**
+   * Joueurs partis de la room en cours de tournoi (jamais reinitialise, un
+   * depart est definitif) : tout match dont un camp est parti SANS avoir
+   * soumis ce round se resout par forfait au lieu d'attendre indefiniment
+   * (voir tryResolveRound). Une soumission deja faite reste valable.
+   */
+  departed: Set<string>;
   finished: boolean;
   championId?: string;
 }
@@ -136,6 +143,7 @@ export class DraftService {
         rounds: [pairRound(participants, 1, () => rollMatchEvent(budget, forcedEvent))],
         currentRound: 1,
         roundSubmissions: new Map(),
+        departed: new Set(),
         finished: false,
       });
       // Pas d'event/budget unique a annoncer pour tout le tournoi : chaque
@@ -171,6 +179,15 @@ export class DraftService {
 
   isTournament(roomCode: string): boolean {
     return this.sessions.get(roomCode)?.mode === 'tournament';
+  }
+
+  hasSession(roomCode: string): boolean {
+    return this.sessions.has(roomCode);
+  }
+
+  /** Nettoyage a la fermeture de la room (le dernier joueur parti n'emet pas `room.player-left`). */
+  clearRoom(roomCode: string): void {
+    this.sessions.delete(roomCode);
   }
 
   getBracketProgress(roomCode: string): TournamentProgress | undefined {
@@ -290,7 +307,11 @@ export class DraftService {
     const session = this.sessions.get(roomCode);
     if (!session || session.mode !== 'single') return false;
     const stillExpected = session.participants.filter((id) => connectedPlayerIds.includes(id));
-    return stillExpected.length > 0 && stillExpected.every((id) => session.submissions.has(id));
+    // Plus aucun participant connecte : personne ne soumettra plus jamais, on
+    // considere la manche complete des qu'il existe au moins une soumission
+    // (resultats avec ce qu'il y a plutot qu'une attente infinie).
+    if (stillExpected.length === 0) return session.submissions.size > 0;
+    return stillExpected.every((id) => session.submissions.has(id));
   }
 
   computeResults(roomCode: string): { results: DraftResult[] } {
@@ -336,7 +357,14 @@ export class DraftService {
 
   // ---- mode "tournament" (4+ joueurs) : bracket round-par-round ----
 
-  /** A appeler juste apres submitPick en mode tournoi : resout les matchs desormais prets, avance le round si complet. */
+  /** Marque un joueur parti de la room : ses matchs non soumis (ce round et les suivants) se resoudront par forfait via tryResolveRound. */
+  markPlayerDeparted(roomCode: string, playerId: string): void {
+    const session = this.sessions.get(roomCode);
+    if (!session || session.mode !== 'tournament') return;
+    session.departed.add(playerId);
+  }
+
+  /** A appeler juste apres submitPick OU apres un depart en mode tournoi : resout les matchs desormais prets (soumissions completes ou forfait), avance le round si complet. */
   tryResolveRound(
     roomCode: string,
   ): { resolvedMatches: DraftMatchState[]; roundJustCompleted: boolean; tournamentFinished: boolean } {
@@ -345,36 +373,63 @@ export class DraftService {
       return { resolvedMatches: [], roundJustCompleted: false, tournamentFinished: false };
     }
 
-    const round = session.rounds[session.currentRound - 1];
     const resolvedMatches: DraftMatchState[] = [];
-
-    for (const match of round) {
-      if (match.status === 'resolved') continue;
-      const subA = session.roundSubmissions.get(match.playerAId);
-      const subB = match.isCloneMatch
-        ? session.roundSubmissions.get(match.clonedFromPlayerId!)
-        : session.roundSubmissions.get(match.playerBId);
-      if (!subA || !subB) continue;
-
-      // Budget du MATCH (voir DraftMatchState.budget), pas un budget de session unique.
-      const evalA = this.evaluate(match.playerAId, subA, match.budget);
-      const evalB = this.evaluate(match.playerBId, subB, match.budget);
-      const winnerId =
-        evalA.totalScore === evalB.totalScore
-          ? [match.playerAId, match.playerBId][Math.round(Math.random())]
-          : evalA.totalScore > evalB.totalScore
-            ? match.playerAId
-            : match.playerBId;
-
-      match.status = 'resolved';
-      match.winnerId = winnerId;
-      match.scenario = this.buildMatchScenario(`${roomCode}:${match.round}:${match.matchIndex}`, evalA, evalB, winnerId);
-      resolvedMatches.push(match);
-    }
-
-    const roundJustCompleted = resolvedMatches.length > 0 && round.every((m) => m.status === 'resolved');
+    let roundJustCompleted = false;
     let tournamentFinished = false;
-    if (roundJustCompleted) tournamentFinished = this.advanceRound(session);
+
+    // Boucle jusqu'a stabilisation : un round entierement resolu par forfaits
+    // peut ouvrir un round suivant lui-meme deja resolvable (tous les
+    // qualifies restants sont partis), sans qu'aucune soumission future ne
+    // vienne relancer la resolution. Sans ca, le bracket gelerait pour les
+    // joueurs/spectateurs encore connectes.
+    let progressed = true;
+    while (progressed && !tournamentFinished) {
+      progressed = false;
+      const round = session.rounds[session.currentRound - 1];
+
+      for (const match of round) {
+        if (match.status === 'resolved') continue;
+        const sideBId = match.isCloneMatch ? match.clonedFromPlayerId! : match.playerBId;
+        const subA = session.roundSubmissions.get(match.playerAId);
+        const subB = session.roundSubmissions.get(sideBId);
+        // Un joueur parti sans avoir soumis est forfait : on ne l'attend plus.
+        const forfeitA = !subA && session.departed.has(match.playerAId);
+        const forfeitB = !subB && session.departed.has(sideBId);
+        if ((!subA && !forfeitA) || (!subB && !forfeitB)) continue;
+
+        if (!subA || !subB) {
+          // Forfait : pas de scores a comparer ni de scenario a generer, le
+          // camp encore en lice gagne d'office (playerA arbitrairement si les
+          // deux camps sont partis : il retombera forfait au round suivant).
+          match.status = 'resolved';
+          match.winnerId = subA ? match.playerAId : subB ? match.playerBId : match.playerAId;
+          resolvedMatches.push(match);
+          progressed = true;
+          continue;
+        }
+
+        // Budget du MATCH (voir DraftMatchState.budget), pas un budget de session unique.
+        const evalA = this.evaluate(match.playerAId, subA, match.budget);
+        const evalB = this.evaluate(match.playerBId, subB, match.budget);
+        const winnerId =
+          evalA.totalScore === evalB.totalScore
+            ? [match.playerAId, match.playerBId][Math.round(Math.random())]
+            : evalA.totalScore > evalB.totalScore
+              ? match.playerAId
+              : match.playerBId;
+
+        match.status = 'resolved';
+        match.winnerId = winnerId;
+        match.scenario = this.buildMatchScenario(`${roomCode}:${match.round}:${match.matchIndex}`, evalA, evalB, winnerId);
+        resolvedMatches.push(match);
+        progressed = true;
+      }
+
+      if (progressed && round.every((m) => m.status === 'resolved')) {
+        roundJustCompleted = true;
+        tournamentFinished = this.advanceRound(session);
+      }
+    }
 
     return { resolvedMatches, roundJustCompleted, tournamentFinished };
   }

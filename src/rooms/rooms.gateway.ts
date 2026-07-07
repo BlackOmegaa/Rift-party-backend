@@ -21,6 +21,7 @@ import {
 import { PERSISTENCE_EVENTS } from "../common/constants/internal-events.constants";
 import { CreateRoomDto } from "./dto/create-room.dto";
 import { JoinRoomDto } from "./dto/join-room.dto";
+import { Room } from "./interfaces/room.interface";
 
 @WebSocketGateway({ cors: { origin: ALLOWED_ORIGINS, credentials: true } })
 export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
@@ -150,6 +151,7 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 			});
 		}
 		this.anonIdBySocket.delete(client.id);
+		this.createHistory.delete(client.id);
 
 		const room = this.roomsService.leaveRoom(client.id);
 		if (!room) return;
@@ -242,12 +244,45 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 		return value ? String(value).slice(0, 40) : null;
 	}
 
+	/**
+	 * Anti-abus : les gateways sockets ne sont pas couverts par le ThrottlerGuard
+	 * HTTP, et creer une room est la seule action socket qui alloue de l'etat
+	 * serveur sans etre bornee par une room existante. Fenetre glissante d'une
+	 * minute par socket, purge a la deconnexion.
+	 */
+	private readonly createHistory = new Map<string, number[]>();
+	private static readonly MAX_CREATES_PER_MINUTE = 5;
+
+	private allowRoomCreate(socketId: string): boolean {
+		const now = Date.now();
+		const recent = (this.createHistory.get(socketId) ?? []).filter(
+			(t) => now - t < 60_000,
+		);
+		if (recent.length >= RoomsGateway.MAX_CREATES_PER_MINUTE) {
+			this.createHistory.set(socketId, recent);
+			return false;
+		}
+		recent.push(now);
+		this.createHistory.set(socketId, recent);
+		return true;
+	}
+
 	@SubscribeMessage(ROOM_EVENTS.CREATE)
 	async handleCreate(
 		@ConnectedSocket() client: Socket,
 		@MessageBody() dto: CreateRoomDto,
 	) {
 		try {
+			if (!this.allowRoomCreate(client.id)) {
+				client.emit(ROOM_EVENTS.ERROR, {
+					message: "Trop de rooms creees d'un coup, attends un instant.",
+				});
+				return;
+			}
+			// Un socket = une room : creer depuis une room existante en sort
+			// proprement d'abord (sinon l'ancienne room garde un joueur fantome
+			// jamais nettoye et le mapping socketToRoom est ecrase).
+			this.forceLeaveCurrentRoom(client);
 			const isSubscriber = await this.resolveIsSubscriber(dto.playerToken);
 			const room = this.roomsService.createRoom(
 				client.id,
@@ -274,6 +309,10 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 		@MessageBody() dto: JoinRoomDto,
 	) {
 		try {
+			// Meme regle que handleCreate : un socket ne peut appartenir qu'a une
+			// room a la fois (voir forceLeaveCurrentRoom). Ne fait rien si le
+			// socket n'est dans aucune room (cas normal).
+			this.forceLeaveCurrentRoom(client);
 			const isSubscriber = await this.resolveIsSubscriber(dto.playerToken);
 			const room = this.roomsService.joinRoom(
 				client.id,
@@ -318,6 +357,18 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
 	@SubscribeMessage(ROOM_EVENTS.LEAVE)
 	handleLeave(@ConnectedSocket() client: Socket) {
+		this.forceLeaveCurrentRoom(client);
+	}
+
+	/**
+	 * Sortie propre de la room courante du socket, quel que soit le chemin
+	 * (bouton quitter, ou create/join alors qu'on est deja dans une room).
+	 * Emet TOUJOURS l'event interne `room.player-left` : les mini-jeux s'en
+	 * servent pour debloquer une attente (vote, ready-check, soumission...)
+	 * qui ne guettait que ce joueur — un leave volontaire doit les prevenir
+	 * exactement comme une deconnexion (voir handleDisconnect).
+	 */
+	private forceLeaveCurrentRoom(client: Socket): void {
 		const room = this.roomsService.getRoomBySocket(client.id);
 		if (!room) return;
 		client.leave(room.code);
@@ -328,6 +379,10 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 			.emit(ROOM_EVENTS.PLAYER_LEFT, { playerId: client.id });
 		if (updated.players.length > 0) {
 			this.server.to(room.code).emit(ROOM_EVENTS.STATE, updated);
+			this.eventEmitter.emit("room.player-left", {
+				roomCode: updated.code,
+				playerId: client.id,
+			});
 		} else {
 			this.scheduleEmptyRoomCleanup(room.code);
 		}
@@ -352,10 +407,12 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 		@ConnectedSocket() client: Socket,
 		@MessageBody() dto: { pseudo: string },
 	) {
-		const room = this.roomsService.renamePlayer(
-			client.id,
-			dto.pseudo?.trim() || "Joueur",
-		);
+		// Meme borne que les DTO de create/join (Length 1-24) : le rename n'a pas
+		// de DTO class-validator, sans clamp un pseudo arbitrairement long serait
+		// stocke et rediffuse a toute la room dans chaque ROOM_STATE.
+		const pseudo =
+			typeof dto?.pseudo === "string" ? dto.pseudo.trim().slice(0, 24) : "";
+		const room = this.roomsService.renamePlayer(client.id, pseudo || "Joueur");
 		if (room) this.server.to(room.code).emit(ROOM_EVENTS.STATE, room);
 	}
 
@@ -464,9 +521,18 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 			submissions = new Map<string, { points: number; summary: string }>();
 			this.genericSegmentSubmissions.set(key, submissions);
 		}
+		// Score declaratif client (pas de calcul serveur pour les jeux generiques) :
+		// au minimum, on rejette NaN/Infinity qui pollueraient le classement, on
+		// plafonne, et on borne le resume qui est stocke puis rediffuse.
+		const rawPoints = Number(dto?.points ?? 0);
 		submissions.set(client.id, {
-			points: Math.max(0, Math.round(dto.points ?? 0)),
-			summary: dto.summary ?? "Manche terminee.",
+			points: Number.isFinite(rawPoints)
+				? Math.max(0, Math.min(9999, Math.round(rawPoints)))
+				: 0,
+			summary:
+				typeof dto?.summary === "string"
+					? dto.summary.slice(0, 300)
+					: "Manche terminee.",
 		});
 
 		const scores = Array.from(submissions.entries()).map(([playerId, entry]) => ({
@@ -482,34 +548,96 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 		});
 
 		if (submissions.size >= room.players.length) {
-			const scores: Record<string, number> = {};
-			const sorted = Array.from(submissions.entries()).sort(
-				(a, b) => b[1].points - a[1].points,
-			);
-			for (const [playerId, entry] of submissions.entries())
-				scores[playerId] = entry.points;
-			const winnerName =
-				room.players.find((p) => p.id === sorted[0]?.[0])?.pseudo ??
-				"Un joueur";
-			const zero = Array.from(submissions.entries()).find(
-				([, entry]) => entry.points <= 0,
-			);
-			const zeroName = zero
-				? room.players.find((p) => p.id === zero[0])?.pseudo
-				: null;
-			const summary = zeroName
-				? `${winnerName} prend la manche. ${zeroName} repart avec 0 point, effondrement total.`
-				: `${winnerName} prend la manche avec ${sorted[0]?.[1].points ?? 0} pts.`;
-			const updated = this.roomsService.finishMixSegment(room.code, {
+			this.completeGenericSegment(room, key, submissions);
+		}
+	}
+
+	/** Cloture d'un segment generique : scoring, resume et broadcast. Appele quand tout le monde a soumis (handleSegmentComplete) ou quand le depart d'un joueur rend le quorum atteint (handlePlayerLeftQuorum). */
+	private completeGenericSegment(
+		room: Room,
+		key: string,
+		submissions: Map<string, { points: number; summary: string }>,
+	): void {
+		if (!room.currentGameId) return;
+		const scores: Record<string, number> = {};
+		const sorted = Array.from(submissions.entries()).sort(
+			(a, b) => b[1].points - a[1].points,
+		);
+		for (const [playerId, entry] of submissions.entries())
+			scores[playerId] = entry.points;
+		const winnerName =
+			room.players.find((p) => p.id === sorted[0]?.[0])?.pseudo ??
+			"Un joueur";
+		const zero = Array.from(submissions.entries()).find(
+			([, entry]) => entry.points <= 0,
+		);
+		const zeroName = zero
+			? room.players.find((p) => p.id === zero[0])?.pseudo
+			: null;
+		const summary = zeroName
+			? `${winnerName} prend la manche. ${zeroName} repart avec 0 point, effondrement total.`
+			: `${winnerName} prend la manche avec ${sorted[0]?.[1].points ?? 0} pts.`;
+		const updated = this.roomsService.finishMixSegment(room.code, {
+			gameId: room.currentGameId,
+			roundNumber: room.roundHistory.length + 1,
+			scores,
+			summary,
+			finishedAt: new Date().toISOString(),
+		});
+		this.genericSegmentSubmissions.delete(key);
+		this.clearSegmentWatchdog(room.code);
+		if (updated) this.broadcastRoundFinish(updated.code);
+	}
+
+	/**
+	 * Depart d'un joueur (deco ou leave) pendant une manche : les attentes
+	 * "tout le monde a soumis" du flux generique et de la Tier list ne sont
+	 * sinon re-testees qu'a la reception d'une nouvelle soumission — qui
+	 * n'arrivera jamais si le partant etait le dernier attendu. Sa soumission
+	 * eventuelle est retiree pour ne pas garder un score fantome.
+	 */
+	@OnEvent("room.player-left")
+	handlePlayerLeftQuorum(payload: { roomCode: string; playerId: string }): void {
+		const room = this.roomsService.getRoom(payload.roomCode);
+		if (!room || !room.currentGameId || room.players.length === 0) return;
+		if (room.activeMix && room.activeMix.status !== "running") return;
+		const cursor = room.activeMix?.cursor ?? "solo";
+
+		const segmentKey = `${room.code}:${cursor}:${room.currentGameId}`;
+		const submissions = this.genericSegmentSubmissions.get(segmentKey);
+		if (submissions) {
+			submissions.delete(payload.playerId);
+			if (submissions.size >= room.players.length) {
+				this.completeGenericSegment(room, segmentKey, submissions);
+				return;
+			}
+			this.server.to(room.code).emit("party:segment-progress", {
+				ready: submissions.size,
+				total: room.players.length,
 				gameId: room.currentGameId,
-				roundNumber: room.roundHistory.length + 1,
-				scores,
-				summary,
-				finishedAt: new Date().toISOString(),
+				scores: Array.from(submissions.entries()).map(([playerId, entry]) => ({
+					playerId,
+					pseudo: room.players.find((p) => p.id === playerId)?.pseudo ?? "Joueur",
+					points: entry.points,
+				})),
 			});
-			this.genericSegmentSubmissions.delete(key);
-			this.clearSegmentWatchdog(room.code);
-			if (updated) this.broadcastRoundFinish(updated.code);
+		}
+
+		if (room.currentGameId !== "tiktok-ranking") return;
+		const suffix = `:${cursor}`;
+		for (const [key, tiktokSubs] of Array.from(this.tiktokSubmissions.entries())) {
+			if (!key.startsWith(`${room.code}:`) || !key.endsWith(suffix)) continue;
+			tiktokSubs.delete(payload.playerId);
+			const question = key.slice(room.code.length + 1, key.length - suffix.length);
+			if (tiktokSubs.size > 0 && tiktokSubs.size >= room.players.length) {
+				this.openTiktokReview(room, key, question, tiktokSubs);
+			} else {
+				this.server.to(room.code).emit("tiktok:progress", {
+					question,
+					ready: tiktokSubs.size,
+					total: room.players.length,
+				});
+			}
 		}
 	}
 
@@ -520,6 +648,17 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 	) {
 		const room = this.roomsService.getRoomBySocket(client.id);
 		if (!room) return;
+		// Payload non couvert par un DTO class-validator : question et placement
+		// sont bornes ici, sinon chaque valeur distincte de question cree des
+		// entrees dans 3 Maps jamais purgees avant fermeture de room (DoS memoire).
+		if (
+			typeof dto?.question !== "string" ||
+			!dto.question.length ||
+			dto.question.length > 120
+		)
+			return;
+		const placement = this.sanitizeTiktokPlacement(dto.placement);
+		if (!placement) return;
 		const key = this.tiktokKey(
 			room.code,
 			dto.question,
@@ -530,7 +669,7 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 			submissions = new Map<string, Record<number, string>>();
 			this.tiktokSubmissions.set(key, submissions);
 		}
-		submissions.set(client.id, dto.placement);
+		submissions.set(client.id, placement);
 
 		const ready = submissions.size;
 		const total = room.players.length;
@@ -539,41 +678,65 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 			.emit("tiktok:progress", { question: dto.question, ready, total });
 
 		if (ready >= total) {
-			const byPlayer = Array.from(submissions.entries()).map(
-				([playerId, placement]) => ({
-					playerId,
-					pseudo:
-						room.players.find((p) => p.id === playerId)?.pseudo ?? "Joueur",
-					placement,
-				}),
-			);
-			const placements = byPlayer.map((r) => r.placement);
-			const baseScores: Record<string, number> = {};
-			for (const row of byPlayer)
-				baseScores[row.playerId] = this.scoreTiktokPlacement(
-					row.placement,
-					placements,
-				);
-			this.tiktokReviewSessions.set(key, {
-				question: dto.question,
-				byPlayer,
-				baseScores,
-				penalties: {},
-				reviewed: new Set<string>(),
-			});
-			this.tiktokFraudVotes.set(key, new Map());
-			this.server.to(room.code).emit("tiktok:results", {
-				question: dto.question,
-				ready,
-				total,
-				byPlayer,
-			});
-			this.tiktokSubmissions.delete(key);
-			// Nouvelle fenetre pour la phase tribunal (menee par l'host) : plus lente
-			// et distincte de la soumission, elle merite son propre delai plutot que
-			// de rester sous le timeout de la phase precedente.
-			if (room.activeMix?.status === "running") this.armSegmentWatchdog(room.code);
+			this.openTiktokReview(room, key, dto.question, submissions);
 		}
+	}
+
+	/** Seuls les slots 1-10 avec un nom de champion court sont conserves : tout le reste du payload client est jete. Renvoie null si le payload n'est pas exploitable. */
+	private sanitizeTiktokPlacement(raw: unknown): Record<number, string> | null {
+		if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+		const placement: Record<number, string> = {};
+		for (const [slot, champ] of Object.entries(raw as Record<string, unknown>)) {
+			const slotNumber = Number(slot);
+			if (!Number.isInteger(slotNumber) || slotNumber < 1 || slotNumber > 10)
+				continue;
+			if (typeof champ !== "string" || !champ.length) continue;
+			placement[slotNumber] = champ.slice(0, 40);
+		}
+		return placement;
+	}
+
+	/** Ouverture de la phase tribunal : scoring de base, session de review et broadcast des resultats. Appele quand tout le monde a soumis (handleTiktokSubmit) ou quand un depart rend le quorum atteint (handlePlayerLeftQuorum). */
+	private openTiktokReview(
+		room: Room,
+		key: string,
+		question: string,
+		submissions: Map<string, Record<number, string>>,
+	): void {
+		const byPlayer = Array.from(submissions.entries()).map(
+			([playerId, placement]) => ({
+				playerId,
+				pseudo:
+					room.players.find((p) => p.id === playerId)?.pseudo ?? "Joueur",
+				placement,
+			}),
+		);
+		const placements = byPlayer.map((r) => r.placement);
+		const baseScores: Record<string, number> = {};
+		for (const row of byPlayer)
+			baseScores[row.playerId] = this.scoreTiktokPlacement(
+				row.placement,
+				placements,
+			);
+		this.tiktokReviewSessions.set(key, {
+			question,
+			byPlayer,
+			baseScores,
+			penalties: {},
+			reviewed: new Set<string>(),
+		});
+		this.tiktokFraudVotes.set(key, new Map());
+		this.server.to(room.code).emit("tiktok:results", {
+			question,
+			ready: submissions.size,
+			total: room.players.length,
+			byPlayer,
+		});
+		this.tiktokSubmissions.delete(key);
+		// Nouvelle fenetre pour la phase tribunal (menee par l'host) : plus lente
+		// et distincte de la soumission, elle merite son propre delai plutot que
+		// de rester sous le timeout de la phase precedente.
+		if (room.activeMix?.status === "running") this.armSegmentWatchdog(room.code);
 	}
 
 	@SubscribeMessage("tiktok:fraud-vote")
@@ -585,6 +748,11 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 		const room = this.roomsService.getRoomBySocket(client.id);
 		if (!room || room.players.length < 3 || client.id === dto.targetPlayerId)
 			return;
+		// Payload brut (pas de DTO) : memes bornes que tiktok:submit, et slot
+		// restreint aux valeurs du protocole (-1 saine, 0 tout frauduleux, 1-10).
+		if (typeof dto?.question !== "string" || dto.question.length > 120) return;
+		if (typeof dto?.targetPlayerId !== "string") return;
+		if (!Number.isInteger(dto.slot) || dto.slot < -1 || dto.slot > 10) return;
 
 		const key = this.tiktokKey(
 			room.code,
@@ -640,6 +808,8 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 	) {
 		const room = this.roomsService.getRoomBySocket(client.id);
 		if (!room || room.hostId !== client.id) return;
+		if (typeof dto?.question !== "string" || dto.question.length > 120) return;
+		if (typeof dto?.reviewedPlayerId !== "string") return;
 		const key = this.tiktokKey(
 			room.code,
 			dto.question,

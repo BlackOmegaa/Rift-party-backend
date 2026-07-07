@@ -11,6 +11,7 @@ import { Server, Socket } from 'socket.io';
 import { CroquisService } from './croquis.service';
 import { RoomsService } from '../rooms/rooms.service';
 import { CROQUIS_EVENTS, ROOM_EVENTS } from '../common/constants/socket-events.constants';
+import { PERSISTENCE_EVENTS } from '../common/constants/internal-events.constants';
 
 const GAME_ID = 'croquis';
 
@@ -56,6 +57,13 @@ export class CroquisGateway {
     if (!outcome) return;
     if (outcome.allSubmitted) this.openGallery(payload.roomCode);
     else if (outcome.allGuessed) this.reveal(payload.roomCode);
+  }
+
+  @OnEvent(PERSISTENCE_EVENTS.ROOM_CLOSED)
+  handleRoomClosed(payload: { roomCode: string }) {
+    // Le dernier joueur parti n'emet pas `room.player-left` : sans ce nettoyage,
+    // la session (et son timer arme) survivrait a la fermeture de la room.
+    this.croquisService.clearRoom(payload.roomCode);
   }
 
   @SubscribeMessage(CROQUIS_EVENTS.REQUEST_STATE)
@@ -108,22 +116,30 @@ export class CroquisGateway {
     const room = this.roomsService.getRoomBySocket(client.id);
     if (!room || room.hostId !== client.id) return;
     try {
-      if (this.croquisService.isLastDrawing(room.code)) {
-        this.finishGame(room.code);
-        return;
-      }
-      const item = this.croquisService.nextDrawing(room.code);
-      this.server.to(room.code).emit(CROQUIS_EVENTS.GALLERY_ITEM, item);
+      this.advanceGallery(room.code);
     } catch (err) {
       client.emit(ROOM_EVENTS.ERROR, { message: (err as Error).message });
     }
   }
 
-  /** Timeout : fin de la phase dessin (retardataires sans dessin) ou du dessin courant (devinettes manquantes). */
+  /** Avance la galerie (host ou filet de securite) : dessin suivant ou fin de partie. */
+  private advanceGallery(roomCode: string) {
+    if (this.croquisService.isLastDrawing(roomCode)) {
+      this.finishGame(roomCode);
+      return;
+    }
+    const item = this.croquisService.nextDrawing(roomCode);
+    this.server.to(roomCode).emit(CROQUIS_EVENTS.GALLERY_ITEM, item);
+    // Session reduite a l'artiste seul : personne ne devinera, on revele direct.
+    if (this.croquisService.noGuesserExpected(roomCode)) this.reveal(roomCode);
+  }
+
+  /** Timeout : fin de la phase dessin (retardataires sans dessin), du dessin courant (devinettes manquantes) ou du reveal (host qui ne suit plus). */
   private handleTimeout(roomCode: string) {
     const phase = this.croquisService.phaseOf(roomCode);
     if (phase === 'drawing') this.openGallery(roomCode);
     else if (phase === 'guessing') this.reveal(roomCode);
+    else if (phase === 'reveal') this.advanceGallery(roomCode);
   }
 
   private openGallery(roomCode: string) {
@@ -134,6 +150,8 @@ export class CroquisGateway {
       return;
     }
     this.server.to(roomCode).emit(CROQUIS_EVENTS.GALLERY_ITEM, item);
+    // Session reduite a l'artiste seul : personne ne devinera, on revele direct.
+    if (this.croquisService.noGuesserExpected(roomCode)) this.reveal(roomCode);
   }
 
   private reveal(roomCode: string) {

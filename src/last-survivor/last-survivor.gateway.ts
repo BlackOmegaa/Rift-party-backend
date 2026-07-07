@@ -11,6 +11,7 @@ import { Server, Socket } from 'socket.io';
 import { LastSurvivorService } from './last-survivor.service';
 import { RoomsService } from '../rooms/rooms.service';
 import { LAST_SURVIVOR_EVENTS, ROOM_EVENTS } from '../common/constants/socket-events.constants';
+import { PERSISTENCE_EVENTS } from '../common/constants/internal-events.constants';
 
 const GAME_ID = 'last-survivor';
 /** Pool complet en standalone (7 eliminations), reduit en Party Mix pour tenir dans un segment. */
@@ -54,6 +55,13 @@ export class LastSurvivorGateway {
     if (check?.allVoted) this.revealRound(payload.roomCode);
   }
 
+  @OnEvent(PERSISTENCE_EVENTS.ROOM_CLOSED)
+  handleRoomClosed(payload: { roomCode: string }) {
+    // Le dernier joueur parti n'emet pas `room.player-left` : sans ce nettoyage,
+    // la session (et son timer arme) survivrait a la fermeture de la room.
+    this.lastSurvivorService.clearRoom(payload.roomCode);
+  }
+
   @SubscribeMessage(LAST_SURVIVOR_EVENTS.REQUEST_STATE)
   handleRequestState(@ConnectedSocket() client: Socket) {
     const room = this.roomsService.getRoomBySocket(client.id);
@@ -95,19 +103,26 @@ export class LastSurvivorGateway {
     const room = this.roomsService.getRoomBySocket(client.id);
     if (!room || room.hostId !== client.id) return;
     try {
-      if (this.lastSurvivorService.isFinished(room.code)) {
-        this.finishGame(room.code);
-        return;
-      }
-      const info = this.lastSurvivorService.nextRound(
-        room.code,
-        room.settings.roundTimeSec,
-        (code) => this.handleTimeout(code),
-      );
-      this.server.to(room.code).emit(LAST_SURVIVOR_EVENTS.ROUND, info);
+      this.advanceRound(room.code);
     } catch (err) {
       client.emit(ROOM_EVENTS.ERROR, { message: (err as Error).message });
     }
+  }
+
+  /** Avance apres le reveal (host ou filet de securite) : elimination suivante ou fin de partie. */
+  private advanceRound(roomCode: string) {
+    if (this.lastSurvivorService.isFinished(roomCode)) {
+      this.finishGame(roomCode);
+      return;
+    }
+    const room = this.roomsService.getRoom(roomCode);
+    if (!room) return;
+    const info = this.lastSurvivorService.nextRound(
+      roomCode,
+      room.settings.roundTimeSec,
+      (code) => this.handleTimeout(code),
+    );
+    this.server.to(roomCode).emit(LAST_SURVIVOR_EVENTS.ROUND, info);
   }
 
   /** Temps ecoule pendant le vote : les retardataires sont comptes en abstention et l'elimination est revelee. */
@@ -116,8 +131,14 @@ export class LastSurvivorGateway {
     this.revealRound(roomCode);
   }
 
+  /** Filet de securite : l'host n'a pas avance le reveal a temps, le serveur avance a sa place. */
+  private handleRevealTimeout(roomCode: string) {
+    if (this.lastSurvivorService.phaseOf(roomCode) !== 'reveal') return;
+    this.advanceRound(roomCode);
+  }
+
   private revealRound(roomCode: string) {
-    const result = this.lastSurvivorService.revealRound(roomCode);
+    const result = this.lastSurvivorService.revealRound(roomCode, (code) => this.handleRevealTimeout(code));
     this.server.to(roomCode).emit(LAST_SURVIVOR_EVENTS.ROUND_RESULT, result);
   }
 

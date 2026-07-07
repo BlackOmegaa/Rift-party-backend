@@ -11,6 +11,7 @@ import { Server, Socket } from 'socket.io';
 import { UndercoverService } from './undercover.service';
 import { RoomsService } from '../rooms/rooms.service';
 import { ROOM_EVENTS, UNDERCOVER_EVENTS } from '../common/constants/socket-events.constants';
+import { PERSISTENCE_EVENTS } from '../common/constants/internal-events.constants';
 
 const GAME_ID = 'undercover-champion';
 const VOTE_TIMEOUT_MS = 45_000;
@@ -81,10 +82,20 @@ export class UndercoverGateway {
       .emit(UNDERCOVER_EVENTS.REVEAL_PROGRESS, this.undercoverService.revealProgress(room.code));
     if (!allReady) return;
 
-    const turn = this.undercoverService.beginTurns(room.code, (code) =>
+    this.beginTurnsSkippingDeparted(room.code);
+  }
+
+  /** Demarre la phase de tours. Si le premier tour revient a un joueur deja parti, il est consomme immediatement (mot vide) au lieu de faire attendre le lobby jusqu'au timer. */
+  private beginTurnsSkippingDeparted(roomCode: string): void {
+    const turn = this.undercoverService.beginTurns(roomCode, (code) =>
       this.handleTurnTimeout(code),
     );
-    if (turn) this.server.to(room.code).emit(UNDERCOVER_EVENTS.TURN_STARTED, turn);
+    if (!turn) return;
+    if (!this.undercoverService.isDeparted(roomCode, turn.playerId)) {
+      this.server.to(roomCode).emit(UNDERCOVER_EVENTS.TURN_STARTED, turn);
+      return;
+    }
+    this.handleTurnTimeout(roomCode);
   }
 
   @SubscribeMessage(UNDERCOVER_EVENTS.SUBMIT_WORD)
@@ -136,20 +147,65 @@ export class UndercoverGateway {
     }
   }
 
+  /**
+   * Depart d'un joueur (deco OU leave volontaire) : chaque phase a une attente
+   * qui peut ne guetter que lui — reveal (quorum de prets), tours (son timer),
+   * vote (quorum de votants). Sans re-check ici, la manche resterait figee
+   * jusqu'au timer de la phase... ou pour toujours dans le cas du reveal, qui
+   * n'en a pas.
+   */
   @OnEvent('room.player-left')
   handlePlayerLeft(payload: { roomCode: string; playerId: string }) {
     const room = this.roomsService.getRoom(payload.roomCode);
     if (!room) return;
-    const connectedIds = room.players.map((p) => p.id);
-    if (this.undercoverService.isVoteComplete(payload.roomCode, connectedIds)) {
+    const phase = this.undercoverService.phaseOf(payload.roomCode);
+    if (!phase) return;
+    this.undercoverService.markDeparted(payload.roomCode, payload.playerId);
+
+    if (phase === 'reveal') {
+      this.server
+        .to(payload.roomCode)
+        .emit(
+          UNDERCOVER_EVENTS.REVEAL_PROGRESS,
+          this.undercoverService.revealProgress(payload.roomCode),
+        );
+      if (this.undercoverService.isRevealComplete(payload.roomCode)) {
+        this.beginTurnsSkippingDeparted(payload.roomCode);
+      }
+      return;
+    }
+
+    if (phase === 'turn1' || phase === 'turn2') {
+      // C'etait son tour : avance tout de suite (mot vide) au lieu de laisser
+      // le lobby regarder un compte a rebours pour un joueur qui n'est plus la.
+      if (
+        this.undercoverService.currentTurnPlayerId(payload.roomCode) ===
+        payload.playerId
+      ) {
+        this.handleTurnTimeout(payload.roomCode);
+      }
+      return;
+    }
+
+    if (phase === 'vote') {
+      const connectedIds = room.players.map((p) => p.id);
       this.server
         .to(payload.roomCode)
         .emit(
           UNDERCOVER_EVENTS.VOTE_PROGRESS,
           this.undercoverService.getVoteProgress(payload.roomCode),
         );
-      this.finishGame(payload.roomCode);
+      if (this.undercoverService.isVoteComplete(payload.roomCode, connectedIds)) {
+        this.finishGame(payload.roomCode);
+      }
     }
+  }
+
+  /** Room fermee definitivement : purge session + timers, sinon une manche abandonnee reste en memoire pour toujours. */
+  @OnEvent(PERSISTENCE_EVENTS.ROOM_CLOSED)
+  handleRoomClosed(payload: { roomCode: string }) {
+    this.clearVoteTimeout(payload.roomCode);
+    this.undercoverService.clearSession(payload.roomCode);
   }
 
   private handleTurnTimeout(roomCode: string) {
@@ -160,15 +216,27 @@ export class UndercoverGateway {
   }
 
   private advanceOrOpenVote(roomCode: string) {
-    if (this.undercoverService.phaseOf(roomCode) === 'vote') {
-      this.server.to(roomCode).emit(UNDERCOVER_EVENTS.VOTE_PHASE, {});
-      this.armVoteTimeout(roomCode);
-      return;
+    // Boucle : les tours des joueurs partis sont consommes immediatement (mot
+    // vide) au lieu d'imposer un timer complet par tour fantome. Terminaison
+    // garantie : chaque iteration consomme un tour, jusqu'a la phase vote.
+    for (;;) {
+      if (this.undercoverService.phaseOf(roomCode) === 'vote') {
+        this.server.to(roomCode).emit(UNDERCOVER_EVENTS.VOTE_PHASE, {});
+        this.armVoteTimeout(roomCode);
+        return;
+      }
+      const turn = this.undercoverService.nextTurn(roomCode, (code) =>
+        this.handleTurnTimeout(code),
+      );
+      if (!turn) return;
+      if (!this.undercoverService.isDeparted(roomCode, turn.playerId)) {
+        this.server.to(roomCode).emit(UNDERCOVER_EVENTS.TURN_STARTED, turn);
+        return;
+      }
+      const entry = this.undercoverService.autoAdvanceOnTimeout(roomCode);
+      if (!entry) return;
+      this.server.to(roomCode).emit(UNDERCOVER_EVENTS.WORD_SUBMITTED, entry);
     }
-    const turn = this.undercoverService.nextTurn(roomCode, (code) =>
-      this.handleTurnTimeout(code),
-    );
-    if (turn) this.server.to(roomCode).emit(UNDERCOVER_EVENTS.TURN_STARTED, turn);
   }
 
   /** Filet de securite : si un joueur connecte reste inactif sans jamais voter, le vote ne doit pas bloquer la room indefiniment. */

@@ -11,6 +11,8 @@ import {
 
 /** Phase dessin : plus longue que le timer de manche classique, dessiner prend du temps. */
 const DRAWING_TIME_SEC = 90;
+/** Filet de securite : si l'host ne fait pas avancer le reveal, le serveur avance tout seul. */
+const REVEAL_SAFETY_TIME_SEC = 90;
 const GUESSER_POINTS = 10;
 const ARTIST_POINTS_PER_CORRECT = 5;
 /** Garde-fou taille d'un PNG base64 (socket.io coupe a 1 Mo par defaut). */
@@ -212,12 +214,23 @@ export class CroquisService {
 			isLast: session.galleryIndex + 1 >= session.gallery.length,
 		};
 		session.lastReveal = reveal;
+		// Filet de securite : le reveal n'est avance que par l'host ; si son client
+		// ne suit plus, le serveur avance a sa place au bout du delai (via le
+		// handleTimeout du gateway, qui dispatch selon la phase).
+		session.phaseTimeout = setTimeout(() => session.onTimeout(session.roomCode), REVEAL_SAFETY_TIME_SEC * 1000);
 		return reveal;
 	}
 
 	isLastDrawing(roomCode: string): boolean {
 		const session = this.sessions.get(roomCode);
 		return !session || session.galleryIndex + 1 >= session.gallery.length;
+	}
+
+	/** Vrai si le dessin courant n'attend aucun devineur (session reduite a l'artiste seul). */
+	noGuesserExpected(roomCode: string): boolean {
+		const session = this.sessions.get(roomCode);
+		if (!session || session.phase !== 'guessing') return false;
+		return this.guessProgress(session).expectedCount === 0;
 	}
 
 	/** Passe au dessin suivant (phase reveal uniquement, appele par l'host). */
@@ -312,6 +325,12 @@ export class CroquisService {
 			lastReveal: session.phase === 'reveal' ? session.lastReveal : null,
 			results: null,
 		};
+	}
+
+	/** Nettoyage complet a la fermeture de la room : timers + session + dernier resultat. */
+	clearRoom(roomCode: string): void {
+		this.clearSession(roomCode);
+		this.lastResults.delete(roomCode);
 	}
 
 	private currentItem(session: CroquisSession): CroquisGalleryItem {

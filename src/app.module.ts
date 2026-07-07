@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { ConfigModule } from '@nestjs/config';
 import { EventEmitterModule } from '@nestjs/event-emitter';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { AppController } from './app.controller';
 import { RoomsModule } from './rooms/rooms.module';
 import { GamesModule } from './games/games.module';
@@ -27,6 +29,10 @@ import { AdminMetricsModule } from './admin-metrics/admin-metrics.module';
     // "une partie demarre" SANS connaitre les modules de mini-jeu qui ecoutent.
     // C'est ce qui garde le coeur decouple de chaque mini-jeu (cf. ARCHITECTURE.md).
     EventEmitterModule.forRoot(),
+    // Garde-fou global anti brute-force sur les routes HTTP (les gateways
+    // socket.io ne passent pas par ce guard). Limite generale genereuse ; la
+    // route /admin/login a sa propre limite plus stricte via @Throttle.
+    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 60 }]),
     PrismaModule,
     RoomsModule,
     GamesModule,
@@ -44,5 +50,6 @@ import { AdminMetricsModule } from './admin-metrics/admin-metrics.module';
     AdminMetricsModule,
   ],
   controllers: [AppController],
+  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
 export class AppModule {}

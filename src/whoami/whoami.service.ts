@@ -256,8 +256,15 @@ export class WhoamiService {
 		if (idx < session.activeIndex) session.activeIndex -= 1;
 		if (wasActive) {
 			session.activeIndex = session.activeIndex % session.players.length;
+			// Le depart de l'actif peut laisser une table ou tous les survivants ont
+			// deja fini (trouve/rate) : il ne faut PAS relancer une phase "answering"
+			// sur un joueur deja found/failed (nextPlayableIndex renverrait undefined
+			// et le "?? 0" retombait alors sur un index invalide/fini).
+			if (session.players.every((p) => p.found || p.failed)) {
+				return { finished: true };
+			}
 			// Le tour de l'absent est abandonne : on repart proprement du joueur suivant.
-			session.activeIndex = this.nextPlayableIndex(session, session.activeIndex - 1) ?? 0;
+			session.activeIndex = this.nextPlayableIndex(session, session.activeIndex - 1) ?? session.activeIndex;
 			session.phase = 'answering';
 			session.answers = new Map();
 			session.lastQuestion = null;

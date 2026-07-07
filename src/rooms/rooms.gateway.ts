@@ -8,7 +8,7 @@ import {
 	WebSocketServer,
 } from "@nestjs/websockets";
 import { Server, Socket } from "socket.io";
-import { EventEmitter2 } from "@nestjs/event-emitter";
+import { EventEmitter2, OnEvent } from "@nestjs/event-emitter";
 import { RoomsService } from "./rooms.service";
 import {
 	PARTY_EVENTS,
@@ -113,6 +113,31 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 			// leaveRoom() a retourne undefined : c'etait le dernier joueur, la room est fermee.
 			this.eventEmitter.emit(PERSISTENCE_EVENTS.ROOM_CLOSED, { roomCode: roomBefore.code });
 		}
+	}
+
+	/**
+	 * Filet de securite anti-fuite memoire : si une room se ferme au milieu d'un
+	 * segment (dernier joueur deco pendant une manche Tier list / Party Mix), les
+	 * entrees des Maps ci-dessous (indexees par roomCode:...) ne sont jamais
+	 * nettoyees par les chemins normaux (fin de segment, timeout watchdog). Sans
+	 * ce purge elles restent en memoire indefiniment.
+	 */
+	@OnEvent(PERSISTENCE_EVENTS.ROOM_CLOSED)
+	handleRoomClosedCleanup(payload: { roomCode: string }): void {
+		this.purgeRoomState(payload.roomCode);
+	}
+
+	private purgeRoomState(roomCode: string): void {
+		const prefix = `${roomCode}:`;
+		for (const key of Array.from(this.tiktokSubmissions.keys()))
+			if (key.startsWith(prefix)) this.tiktokSubmissions.delete(key);
+		for (const key of Array.from(this.tiktokReviewSessions.keys()))
+			if (key.startsWith(prefix)) this.tiktokReviewSessions.delete(key);
+		for (const key of Array.from(this.tiktokFraudVotes.keys()))
+			if (key.startsWith(prefix)) this.tiktokFraudVotes.delete(key);
+		for (const key of Array.from(this.genericSegmentSubmissions.keys()))
+			if (key.startsWith(prefix)) this.genericSegmentSubmissions.delete(key);
+		this.clearSegmentWatchdog(roomCode);
 	}
 
 	/** Pour les listeners d'analytics (PersistenceListener) qui ont besoin de l'anonId de chaque joueur, pas seulement de son socketId. */

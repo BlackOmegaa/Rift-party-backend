@@ -29,8 +29,13 @@ export class BillingService {
 		return this.stripe;
 	}
 
-	/** Cree une session Stripe Checkout (mode abonnement) pour un joueur deja identifie. */
-	async createCheckoutSession(userId: string, email: string): Promise<{ url: string }> {
+	/**
+	 * Cree une session Stripe Checkout (mode abonnement) pour un joueur deja identifie.
+	 * `returnPath` : chemin d'ou le joueur a lance le paiement (ex. "/room/ABCDE"),
+	 * pour l'y ramener apres coup au lieu de le rediriger de force vers /account
+	 * (sinon un joueur qui s'abonne en cours de partie se retrouve ejecte de sa room).
+	 */
+	async createCheckoutSession(userId: string, email: string, returnPath?: string): Promise<{ url: string }> {
 		const stripe = this.requireStripe();
 		if (!this.priceId) throw new BadRequestException("STRIPE_PRICE_ID non configure.");
 
@@ -41,14 +46,16 @@ export class BillingService {
 			orderBy: { createdAt: "desc" },
 		});
 
+		const safeReturnPath = returnPath?.startsWith("/") ? returnPath : "/account";
+
 		const session = await stripe.checkout.sessions.create({
 			mode: "subscription",
 			line_items: [{ price: this.priceId, quantity: 1 }],
 			customer: existing?.stripeCustomerId,
 			customer_email: existing ? undefined : email,
 			client_reference_id: userId,
-			success_url: `${this.frontendUrl}/account?checkout=success`,
-			cancel_url: `${this.frontendUrl}/account?checkout=cancelled`,
+			success_url: `${this.frontendUrl}${safeReturnPath}?checkout=success`,
+			cancel_url: `${this.frontendUrl}${safeReturnPath}?checkout=cancelled`,
 			subscription_data: { metadata: { userId } },
 		});
 

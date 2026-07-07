@@ -54,10 +54,14 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 	 * Filet de securite Party Mix : si un joueur reste connecte sans jamais
 	 * soumettre (onglet en arriere-plan, client fige...), la manche ne doit
 	 * jamais bloquer les autres indefiniment. Arme a chaque debut de segment,
-	 * desarme des que la manche se termine naturellement.
+	 * REARME a chaque message socket d'un joueur de la room (voir handleConnection :
+	 * les events des autres gateways — croquis, brume, tiktok... — comptent aussi),
+	 * desarme des que la manche se termine naturellement. C'est donc une fenetre
+	 * d'INACTIVITE, pas un plafond de duree : une Tier List avec tribunal ou un
+	 * Croquis de 90s+ ne doivent jamais etre coupes tant que la room est vivante.
 	 */
 	private readonly segmentWatchdogs = new Map<string, NodeJS.Timeout>();
-	private readonly SEGMENT_TIMEOUT_MS = 90_000;
+	private readonly SEGMENT_TIMEOUT_MS = 180_000;
 
 	constructor(
 		private readonly roomsService: RoomsService,
@@ -71,6 +75,10 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 			anonId,
 			socketId: client.id,
 		});
+		// Tout message entrant (quel que soit le gateway : croquis:guess,
+		// brume:vote, tiktok:fraud-vote...) prouve que la manche du Party Mix
+		// n'est pas figee : on repousse le watchdog d'inactivite du segment.
+		client.onAny(() => this.touchSegmentWatchdog(client.id));
 	}
 
 	handleDisconnect(client: Socket) {
@@ -707,6 +715,17 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 			clearTimeout(existing);
 			this.segmentWatchdogs.delete(roomCode);
 		}
+	}
+
+	/**
+	 * Repousse le watchdog du segment de la room de ce socket, uniquement s'il
+	 * est deja arme (= un segment de Party Mix tourne). Appele sur chaque message
+	 * socket entrant : fenetre d'inactivite glissante, pas de plafond de duree.
+	 */
+	private touchSegmentWatchdog(socketId: string): void {
+		const room = this.roomsService.getRoomBySocket(socketId);
+		if (!room || !this.segmentWatchdogs.has(room.code)) return;
+		this.armSegmentWatchdog(room.code);
 	}
 
 	/** Debloque une manche Party Mix figee (joueur connecte mais inactif) en la terminant avec ce qui a ete soumis, plutot que de laisser tout le lobby attendre indefiniment. */

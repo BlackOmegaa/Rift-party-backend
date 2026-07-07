@@ -71,6 +71,18 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 	 */
 	private readonly emptyRoomTimers = new Map<string, NodeJS.Timeout>();
 	private readonly EMPTY_ROOM_GRACE_MS = 20_000;
+	/** Sockets identifies comme bots a la connexion : ignores par les analytics (voir handleConnection/handleDisconnect). */
+	private readonly botSockets = new Set<string>();
+	/**
+	 * User-Agents de bots capables d'executer le JS et donc d'ouvrir un socket :
+	 * crawlers en mode rendu (Googlebot...), outils d'audit (Lighthouse), et
+	 * fetchers de preview de lien. Tokens volontairement PRECIS pour les
+	 * plateformes sociales ("discordbot" et pas "discord") : le navigateur
+	 * integre des apps Discord/WhatsApp est un VRAI joueur potentiel, seul
+	 * leur robot de preview doit etre filtre. UA vide = pas un navigateur.
+	 */
+	private static readonly BOT_UA =
+		/bot|crawl|spider|slurp|headless|lighthouse|pagespeed|pingdom|uptime|monitor|facebookexternalhit|whatsapp\/|telegrambot|discordbot|twitterbot|preview|python-requests|curl\/|wget\/|axios\/|node-fetch/i;
 
 	constructor(
 		private readonly roomsService: RoomsService,
@@ -80,11 +92,18 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 	handleConnection(client: Socket) {
 		const anonId = this.readAnonId(client);
 		this.anonIdBySocket.set(client.id, anonId);
-		this.eventEmitter.emit(PERSISTENCE_EVENTS.SOCKET_CONNECTED, {
-			anonId,
-			socketId: client.id,
-			source: this.readSource(client),
-		});
+		// Bots qui executent le JS (Googlebot en rendu, Lighthouse, previews de
+		// liens...) : connexion socket acceptee (aucun impact gameplay) mais pas
+		// d'evenement analytics, sinon chaque crawl gonfle les visiteurs uniques.
+		if (this.isBotClient(client)) {
+			this.botSockets.add(client.id);
+		} else {
+			this.eventEmitter.emit(PERSISTENCE_EVENTS.SOCKET_CONNECTED, {
+				anonId,
+				socketId: client.id,
+				source: this.readSource(client),
+			});
+		}
 		// Tout message entrant (quel que soit le gateway : croquis:guess,
 		// brume:vote, tiktok:fraud-vote...) prouve que la manche du Party Mix
 		// n'est pas figee : on repousse le watchdog d'inactivite du segment.
@@ -94,16 +113,21 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 	handleDisconnect(client: Socket) {
 		const roomBefore = this.roomsService.getRoomBySocket(client.id);
 		const anonId = this.anonIdBySocket.get(client.id) ?? this.readAnonId(client);
-		this.eventEmitter.emit(PERSISTENCE_EVENTS.SOCKET_DISCONNECTED, {
-			anonId,
-			socketId: client.id,
-			roomCode: roomBefore?.code,
-			// Approximation deliberee : toute deconnexion pendant une manche compte
-			// comme un abandon de CE mini-jeu, qu'il ait deja soumis ou non (le detail
-			// "avait deja valide" varie trop d'un mini-jeu a l'autre pour etre suivi
-			// generiquement ici) - suffisant pour comparer les mini-jeux entre eux.
-			gameId: roomBefore?.status === "in-game" ? roomBefore.currentGameId : null,
-		});
+		// Symetrique du filtre de handleConnection : pas de CONNECT enregistre,
+		// donc pas de DISCONNECT non plus (sinon la duree de session moyenne se
+		// calculerait sur des paires depareillees).
+		if (!this.botSockets.delete(client.id)) {
+			this.eventEmitter.emit(PERSISTENCE_EVENTS.SOCKET_DISCONNECTED, {
+				anonId,
+				socketId: client.id,
+				roomCode: roomBefore?.code,
+				// Approximation deliberee : toute deconnexion pendant une manche compte
+				// comme un abandon de CE mini-jeu, qu'il ait deja soumis ou non (le detail
+				// "avait deja valide" varie trop d'un mini-jeu a l'autre pour etre suivi
+				// generiquement ici) - suffisant pour comparer les mini-jeux entre eux.
+				gameId: roomBefore?.status === "in-game" ? roomBefore.currentGameId : null,
+			});
+		}
 		this.anonIdBySocket.delete(client.id);
 
 		const room = this.roomsService.leaveRoom(client.id);
@@ -176,6 +200,12 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 			id: p.id,
 			anonId: this.anonIdBySocket.get(p.id) ?? "unknown",
 		}));
+	}
+
+	/** Vrai si le handshake ressemble a un bot (UA connue ou absente) : voir BOT_UA. */
+	private isBotClient(client: Socket): boolean {
+		const ua = client.handshake.headers["user-agent"];
+		return !ua || RoomsGateway.BOT_UA.test(ua);
 	}
 
 	/** Lu depuis le query param envoye par SocketService cote front (io(url, { query: { anonId } })). */

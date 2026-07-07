@@ -1,3 +1,4 @@
+import { ALLOWED_ORIGINS } from "../common/constants/cors.constants";
 import {
   ConnectedSocket,
   MessageBody,
@@ -20,7 +21,7 @@ const MIX_POOL_SIZE = 5;
  * Gateway du mini-jeu "Last Survivor". Meme convention que VotePartyGateway :
  * jamais de join/leave de room ici, toujours RoomsService.getRoomBySocket().
  */
-@WebSocketGateway({ cors: true })
+@WebSocketGateway({ cors: { origin: ALLOWED_ORIGINS, credentials: true } })
 export class LastSurvivorGateway {
   @WebSocketServer() server!: Server;
 

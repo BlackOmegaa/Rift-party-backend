@@ -1,3 +1,4 @@
+import { ALLOWED_ORIGINS } from "../common/constants/cors.constants";
 import {
   ConnectedSocket,
   MessageBody,
@@ -21,7 +22,7 @@ const GAME_ID = 'brume';
  * Gateway du mini-jeu "La Brume". Meme convention que UndercoverGateway :
  * jamais de join/leave de room ici, toujours RoomsService.getRoomBySocket().
  */
-@WebSocketGateway({ cors: true })
+@WebSocketGateway({ cors: { origin: ALLOWED_ORIGINS, credentials: true } })
 export class BrumeGateway {
   @WebSocketServer() server!: Server;
 

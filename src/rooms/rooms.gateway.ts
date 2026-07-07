@@ -1,3 +1,4 @@
+import { ALLOWED_ORIGINS } from "../common/constants/cors.constants";
 import {
 	ConnectedSocket,
 	MessageBody,
@@ -18,7 +19,7 @@ import { PERSISTENCE_EVENTS } from "../common/constants/internal-events.constant
 import { CreateRoomDto } from "./dto/create-room.dto";
 import { JoinRoomDto } from "./dto/join-room.dto";
 
-@WebSocketGateway({ cors: true })
+@WebSocketGateway({ cors: { origin: ALLOWED_ORIGINS, credentials: true } })
 export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 	@WebSocketServer() server!: Server;
 	/** socketId -> anonId (identifiant anonyme localStorage cote client), pour les events de connexion/analytics. */

@@ -1,3 +1,4 @@
+import { ALLOWED_ORIGINS } from "../common/constants/cors.constants";
 import {
   ConnectedSocket,
   MessageBody,
@@ -18,7 +19,7 @@ const DEFAULT_ROUNDS = 5;
  * Gateway du mini-jeu "Vote Party". Meme convention que LoldleGateway :
  * jamais de join/leave de room ici, toujours RoomsService.getRoomBySocket().
  */
-@WebSocketGateway({ cors: true })
+@WebSocketGateway({ cors: { origin: ALLOWED_ORIGINS, credentials: true } })
 export class VotePartyGateway {
   @WebSocketServer() server!: Server;
 

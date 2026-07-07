@@ -1,3 +1,4 @@
+import { ALLOWED_ORIGINS } from "../common/constants/cors.constants";
 import {
   ConnectedSocket,
   MessageBody,
@@ -19,7 +20,7 @@ const VOTE_TIMEOUT_MS = 45_000;
  * room : elle retrouve toujours la room courante via RoomsService.getRoomBySocket()
  * (meme convention que DraftGateway).
  */
-@WebSocketGateway({ cors: true })
+@WebSocketGateway({ cors: { origin: ALLOWED_ORIGINS, credentials: true } })
 export class UndercoverGateway {
   @WebSocketServer() server!: Server;
 

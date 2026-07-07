@@ -1,3 +1,4 @@
+import { ALLOWED_ORIGINS } from "../common/constants/cors.constants";
 import {
   ConnectedSocket,
   MessageBody,
@@ -34,7 +35,7 @@ interface PendingReveal {
   timeout: NodeJS.Timeout;
 }
 
-@WebSocketGateway({ cors: true })
+@WebSocketGateway({ cors: { origin: ALLOWED_ORIGINS, credentials: true } })
 export class DraftGateway {
   @WebSocketServer() server!: Server;
 

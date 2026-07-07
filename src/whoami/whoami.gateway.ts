@@ -1,3 +1,4 @@
+import { ALLOWED_ORIGINS } from "../common/constants/cors.constants";
 import {
   ConnectedSocket,
   MessageBody,
@@ -22,7 +23,7 @@ const GAME_ID = 'qui-suis-je';
  * le champion des autres mais jamais le sien), donc START/STATE sont emis
  * socket par socket au lieu d'un broadcast room.
  */
-@WebSocketGateway({ cors: true })
+@WebSocketGateway({ cors: { origin: ALLOWED_ORIGINS, credentials: true } })
 export class WhoamiGateway {
   @WebSocketServer() server!: Server;
 

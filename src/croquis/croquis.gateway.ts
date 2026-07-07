@@ -1,3 +1,4 @@
+import { ALLOWED_ORIGINS } from "../common/constants/cors.constants";
 import {
   ConnectedSocket,
   MessageBody,
@@ -18,7 +19,7 @@ const GAME_ID = 'croquis';
  * secret pour les autres : START est emis socket par socket (meme convention
  * que WhoamiGateway), le reste est broadcast.
  */
-@WebSocketGateway({ cors: true })
+@WebSocketGateway({ cors: { origin: ALLOWED_ORIGINS, credentials: true } })
 export class CroquisGateway {
   @WebSocketServer() server!: Server;
 

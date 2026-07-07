@@ -44,6 +44,14 @@ export function pairRound(
   round: number,
   rollMatchEvent: () => MatchEventRoll,
 ): DraftMatchState[] {
+  // draft.service.ts::advanceRound() ne rappelle jamais cette fonction avec
+  // moins de 2 joueurs (winners.length <= 1 termine le tournoi avant). On le
+  // garde comme invariant explicite : sans lui, 1 joueur produirait un round
+  // sans aucun match (pool vide, pas de clone possible), qui bloquerait le
+  // tournoi silencieusement plutot que d'echouer bruyamment.
+  if (playerIds.length < 2) {
+    throw new Error(`pairRound: au moins 2 joueurs requis (recu ${playerIds.length}).`);
+  }
   const shuffled = [...playerIds].sort(() => Math.random() - 0.5);
   const matches: DraftMatchState[] = [];
   let matchIndex = 0;

@@ -44,9 +44,18 @@ export class PersistenceService {
 
 	async recordRoomClosed(code: string): Promise<void> {
 		try {
+			const now = new Date();
 			await this.prisma.room.updateMany({
 				where: { code, closedAt: null },
-				data: { closedAt: new Date() },
+				data: { closedAt: now },
+			});
+			// Simplification V1 (un seul Match par Room) : la fin de la room cloture
+			// aussi son Match courant, ce qui donne une duree de partie exploitable
+			// (Match.finishedAt - startedAt) sans devoir suivre chaque relance de
+			// Party Mix separement pour l'instant.
+			await this.prisma.match.updateMany({
+				where: { room: { code }, finishedAt: null },
+				data: { finishedAt: now },
 			});
 		} catch (err) {
 			this.logger.warn(`recordRoomClosed(${code}) a echoue : ${(err as Error).message}`);
@@ -103,54 +112,104 @@ export class PersistenceService {
 		}
 	}
 
+	/** Upsert appele a chaque connexion socket : fige la source d'acquisition a la toute premiere visite (jamais ecrasee ensuite). */
+	async upsertVisitor(anonId: string, source: string | null): Promise<void> {
+		try {
+			const now = new Date();
+			await this.prisma.visitor.upsert({
+				where: { anonId },
+				create: { anonId, firstSeenAt: now, lastSeenAt: now, acquisitionSource: source },
+				update: { lastSeenAt: now, visitCount: { increment: 1 } },
+			});
+		} catch (err) {
+			this.logger.warn(`upsertVisitor(${anonId}) a echoue : ${(err as Error).message}`);
+		}
+	}
+
+	/** Arrivee dans une room : `isHost` pour la creation, `viaInvite` si le code venait d'un lien ?join=. */
+	async recordRoomJoin(roomCode: string, anonId: string, isHost: boolean, viaInvite: boolean): Promise<void> {
+		try {
+			await this.prisma.roomJoin.create({ data: { roomCode, anonId, isHost, viaInvite } });
+		} catch (err) {
+			this.logger.warn(`recordRoomJoin(${roomCode}) a echoue : ${(err as Error).message}`);
+		}
+	}
+
+	async recordInviteGenerated(roomCode: string, anonId: string): Promise<void> {
+		try {
+			await this.prisma.inviteGenerated.create({ data: { roomCode, anonId } });
+		} catch (err) {
+			this.logger.warn(`recordInviteGenerated(${roomCode}) a echoue : ${(err as Error).message}`);
+		}
+	}
+
+	/** Un GameSession ouvert par joueur au lancement d'un mini-jeu (segment de Mix ou partie solo). */
 	async recordGameStarted(
 		roomCode: string,
 		gameId: string,
 		players: { id: string; anonId: string }[],
 	): Promise<void> {
 		try {
-			await this.prisma.sessionEvent.createMany({
-				data: players.map((p) => ({
-					anonId: p.anonId,
-					roomCode,
-					gameId,
-					type: "GAME_STARTED" as const,
-				})),
+			await this.prisma.gameSession.createMany({
+				data: players.map((p) => ({ anonId: p.anonId, roomCode, gameId })),
 			});
 		} catch (err) {
 			this.logger.warn(`recordGameStarted(${roomCode}, ${gameId}) a echoue : ${(err as Error).message}`);
 		}
 	}
 
-	async recordGameCompleted(
+	/**
+	 * Cloture tous les GameSession encore ouverts pour ce (roomCode, gameId) :
+	 * COMPLETED pour ceux qui ont un score dans le resultat, ABANDONED pour le
+	 * reste (n'ont jamais soumis avant que la manche ne se termine pour la room).
+	 * Raw SQL pour calculer `durationSec` directement en base (NOW() - startedAt)
+	 * sans avoir a relire chaque ligne pour faire l'arithmetique en JS.
+	 */
+	async closeGameSessions(
 		roomCode: string,
 		gameId: string,
-		completedPlayerIds: string[],
-		players: { id: string; anonId: string }[],
+		completedAnonIds: string[],
 	): Promise<void> {
 		try {
-			const anonIds = players
-				.filter((p) => completedPlayerIds.includes(p.id))
-				.map((p) => p.anonId);
-			if (!anonIds.length) return;
-			await this.prisma.sessionEvent.createMany({
-				data: anonIds.map((anonId) => ({
-					anonId,
-					roomCode,
-					gameId,
-					type: "GAME_COMPLETED" as const,
-				})),
-			});
+			if (completedAnonIds.length) {
+				await this.prisma.$executeRaw`
+					UPDATE "GameSession"
+					SET "endedAt" = NOW(),
+					    "outcome" = 'COMPLETED',
+					    "durationSec" = GREATEST(0, EXTRACT(EPOCH FROM (NOW() - "startedAt"))::int)
+					WHERE "roomCode" = ${roomCode}
+					  AND "gameId" = ${gameId}
+					  AND "outcome" IS NULL
+					  AND "anonId" = ANY(${completedAnonIds})
+				`;
+			}
+			await this.prisma.$executeRaw`
+				UPDATE "GameSession"
+				SET "endedAt" = NOW(),
+				    "outcome" = 'ABANDONED',
+				    "durationSec" = GREATEST(0, EXTRACT(EPOCH FROM (NOW() - "startedAt"))::int)
+				WHERE "roomCode" = ${roomCode}
+				  AND "gameId" = ${gameId}
+				  AND "outcome" IS NULL
+			`;
 		} catch (err) {
-			this.logger.warn(`recordGameCompleted(${roomCode}, ${gameId}) a echoue : ${(err as Error).message}`);
+			this.logger.warn(`closeGameSessions(${roomCode}, ${gameId}) a echoue : ${(err as Error).message}`);
 		}
 	}
 
+	/** Deconnexion en pleine manche : cloture seulement la session de CE joueur (les autres continuent). */
 	async recordGameAbandoned(anonId: string, roomCode: string, gameId: string): Promise<void> {
 		try {
-			await this.prisma.sessionEvent.create({
-				data: { anonId, roomCode, gameId, type: "GAME_ABANDONED" },
-			});
+			await this.prisma.$executeRaw`
+				UPDATE "GameSession"
+				SET "endedAt" = NOW(),
+				    "outcome" = 'ABANDONED',
+				    "durationSec" = GREATEST(0, EXTRACT(EPOCH FROM (NOW() - "startedAt"))::int)
+				WHERE "roomCode" = ${roomCode}
+				  AND "gameId" = ${gameId}
+				  AND "anonId" = ${anonId}
+				  AND "outcome" IS NULL
+			`;
 		} catch (err) {
 			this.logger.warn(`recordGameAbandoned(${roomCode}, ${gameId}) a echoue : ${(err as Error).message}`);
 		}

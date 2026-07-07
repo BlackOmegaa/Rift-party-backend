@@ -115,7 +115,10 @@ enum ConnectionEventType {
 }
 
 /// Connexions/deconnexions socket, identifiees par un anonId genere cote
-/// client (localStorage) puisqu'il n'y a pas de comptes joueurs.
+/// client (localStorage) puisqu'il n'y a pas de comptes joueurs. Log brut
+/// (une ligne par evenement) : source de verite pour les series temporelles
+/// (visiteurs uniques par jour) et la retention par cohorte. Voir `Visitor`
+/// pour l'etat resume (premiere/derniere visite, source d'acquisition).
 model ConnectionEvent {
   id        String              @id @default(uuid())
   anonId    String
@@ -126,26 +129,76 @@ model ConnectionEvent {
 
   @@index([anonId])
   @@index([createdAt])
+  @@index([type, createdAt])
+  @@index([socketId])
 }
 
-enum SessionEventType {
-  GAME_STARTED
-  GAME_COMPLETED
-  GAME_ABANDONED
+/// Etat resume par anonId (une ligne par visiteur, upsert a chaque connexion) :
+/// evite de recalculer "premiere fois vu" en scannant tout l'historique de
+/// ConnectionEvent a chaque chargement du dashboard. `acquisitionSource` est
+/// fige a la premiere visite (first-touch attribution) : jamais ecrase par
+/// les visites suivantes, meme si l'utilisateur revient via un autre canal.
+model Visitor {
+  anonId            String   @id
+  firstSeenAt       DateTime @default(now())
+  lastSeenAt        DateTime @default(now())
+  visitCount        Int      @default(1)
+  acquisitionSource String?
+
+  @@index([firstSeenAt])
+  @@index([lastSeenAt])
 }
 
-/// Cycle de vie d'un mini-jeu pour un joueur donne : la table cle pour mesurer
-/// quels mini-jeux retiennent vs font fuir (GAME_ABANDONED = deconnexion en
-/// pleine partie avant d'avoir termine sa manche).
-model SessionEvent {
-  id        String           @id @default(uuid())
-  anonId    String
+/// Une arrivee dans une room (creation = host, ou JOIN = invite). Alimente le
+/// taux de conversion visiteur -> room rejointe et la viralite (viaInvite).
+model RoomJoin {
+  id        String   @id @default(uuid())
   roomCode  String
-  gameId    String
-  type      SessionEventType
-  createdAt DateTime         @default(now())
+  anonId    String
+  isHost    Boolean  @default(false)
+  viaInvite Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([roomCode])
+  @@index([anonId])
+  @@index([createdAt])
+}
+
+/// Un clic sur "Copier le lien d'invitation" (room.component.ts). Compare a
+/// RoomJoin.viaInvite pour mesurer le taux invitation -> joueur arrive.
+model InviteGenerated {
+  id        String   @id @default(uuid())
+  roomCode  String
+  anonId    String
+  createdAt DateTime @default(now())
+
+  @@index([roomCode])
+  @@index([createdAt])
+}
+
+enum GameSessionOutcome {
+  COMPLETED
+  ABANDONED
+}
+
+/// Un lancement de mini-jeu pour UN joueur (que ce soit un segment de Party Mix
+/// ou une partie solo hors mix) : une ligne creee au demarrage, cloturee a la
+/// fin de la manche (ou a la deconnexion). Remplace l'ancien SessionEvent
+/// (3 lignes disjointes STARTED/COMPLETED/ABANDONED) par une seule ligne avec
+/// debut+fin : permet de calculer une duree sans avoir a recorreler des
+/// evenements separes.
+model GameSession {
+  id          String              @id @default(uuid())
+  anonId      String
+  roomCode    String
+  gameId      String
+  startedAt   DateTime            @default(now())
+  endedAt     DateTime?
+  durationSec Int?
+  outcome     GameSessionOutcome?
 
   @@index([gameId])
   @@index([anonId])
-  @@index([createdAt])
+  @@index([startedAt])
+  @@index([roomCode])
 }

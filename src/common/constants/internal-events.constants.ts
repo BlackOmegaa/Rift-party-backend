@@ -12,4 +12,8 @@ export const PERSISTENCE_EVENTS = {
 	ROUND_FINISHED: "room.round-finished",
 	/** Alias du nom d'event deja emis par RoomsGateway (pas un nouvel event) - liste ici pour la documentation. */
 	GAME_STARTED: "room.game-started",
+	/** Arrivee dans une room : creation (host) ou JOIN (invite ou code tape a la main). */
+	ROOM_JOINED: "room.joined",
+	/** Clic sur "Copier le lien d'invitation". */
+	INVITE_GENERATED: "room.invite-generated",
 } as const;

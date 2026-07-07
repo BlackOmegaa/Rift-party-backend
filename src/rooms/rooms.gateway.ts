@@ -74,6 +74,7 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 		this.eventEmitter.emit(PERSISTENCE_EVENTS.SOCKET_CONNECTED, {
 			anonId,
 			socketId: client.id,
+			source: this.readSource(client),
 		});
 		// Tout message entrant (quel que soit le gateway : croquis:guess,
 		// brume:vote, tiktok:fraud-vote...) prouve que la manche du Party Mix
@@ -128,6 +129,13 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 		return (Array.isArray(raw) ? raw[0] : raw) || "unknown";
 	}
 
+	/** Source d'acquisition calculee cote front (referrer/query param, voir acquisition.ts) : null si non fournie. */
+	private readSource(client: Socket): string | null {
+		const raw = client.handshake.query.source;
+		const value = Array.isArray(raw) ? raw[0] : raw;
+		return value ? String(value).slice(0, 40) : null;
+	}
+
 	@SubscribeMessage(ROOM_EVENTS.CREATE)
 	handleCreate(
 		@ConnectedSocket() client: Socket,
@@ -141,6 +149,12 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 			client.join(room.code);
 			client.emit(ROOM_EVENTS.STATE, room);
 			this.eventEmitter.emit(PERSISTENCE_EVENTS.ROOM_CREATED, { room });
+			this.eventEmitter.emit(PERSISTENCE_EVENTS.ROOM_JOINED, {
+				roomCode: room.code,
+				anonId: this.anonIdBySocket.get(client.id) ?? this.readAnonId(client),
+				isHost: true,
+				viaInvite: false,
+			});
 		} catch (err) {
 			client.emit(ROOM_EVENTS.ERROR, { message: (err as Error).message });
 		}
@@ -161,6 +175,12 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 			const player = room.players.find((p) => p.id === client.id)!;
 			client.to(room.code).emit(ROOM_EVENTS.PLAYER_JOINED, player);
 			this.server.to(room.code).emit(ROOM_EVENTS.STATE, room);
+			this.eventEmitter.emit(PERSISTENCE_EVENTS.ROOM_JOINED, {
+				roomCode: room.code,
+				anonId: this.anonIdBySocket.get(client.id) ?? this.readAnonId(client),
+				isHost: false,
+				viaInvite: !!dto.viaInvite,
+			});
 			if (room.status === "in-game") {
 				// Permet a chaque mini-jeu de resynchroniser un joueur qui rejoint
 				// une manche deja en cours (voir DraftGateway.handlePlayerJoined).
@@ -172,6 +192,16 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 		} catch (err) {
 			client.emit(ROOM_EVENTS.ERROR, { message: (err as Error).message });
 		}
+	}
+
+	@SubscribeMessage("room:invite-generated")
+	handleInviteGenerated(@ConnectedSocket() client: Socket) {
+		const room = this.roomsService.getRoomBySocket(client.id);
+		if (!room) return;
+		this.eventEmitter.emit(PERSISTENCE_EVENTS.INVITE_GENERATED, {
+			roomCode: room.code,
+			anonId: this.anonIdBySocket.get(client.id) ?? this.readAnonId(client),
+		});
 	}
 
 	@SubscribeMessage(ROOM_EVENTS.LEAVE)

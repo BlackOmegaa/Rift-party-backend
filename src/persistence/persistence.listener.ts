@@ -24,6 +24,16 @@ export class PersistenceListener {
 		void this.persistence.recordRoomClosed(payload.roomCode);
 	}
 
+	@OnEvent(PERSISTENCE_EVENTS.ROOM_JOINED)
+	handleRoomJoined(payload: { roomCode: string; anonId: string; isHost: boolean; viaInvite: boolean }) {
+		void this.persistence.recordRoomJoin(payload.roomCode, payload.anonId, payload.isHost, payload.viaInvite);
+	}
+
+	@OnEvent(PERSISTENCE_EVENTS.INVITE_GENERATED)
+	handleInviteGenerated(payload: { roomCode: string; anonId: string }) {
+		void this.persistence.recordInviteGenerated(payload.roomCode, payload.anonId);
+	}
+
 	@OnEvent(PERSISTENCE_EVENTS.ROUND_FINISHED)
 	handleRoundFinished(payload: {
 		roomCode: string;
@@ -33,12 +43,10 @@ export class PersistenceListener {
 	}) {
 		void this.persistence.recordRoundFinished(payload.roomCode, payload.result, payload.playerCount);
 		if (payload.result.gameId !== "free-play") {
-			void this.persistence.recordGameCompleted(
-				payload.roomCode,
-				payload.result.gameId,
-				Object.keys(payload.result.scores),
-				payload.players,
-			);
+			const completedAnonIds = payload.players
+				.filter((p) => Object.keys(payload.result.scores).includes(p.id))
+				.map((p) => p.anonId);
+			void this.persistence.closeGameSessions(payload.roomCode, payload.result.gameId, completedAnonIds);
 		}
 	}
 
@@ -49,8 +57,9 @@ export class PersistenceListener {
 	}
 
 	@OnEvent(PERSISTENCE_EVENTS.SOCKET_CONNECTED)
-	handleSocketConnected(payload: { anonId: string; socketId: string; roomCode?: string }) {
+	handleSocketConnected(payload: { anonId: string; socketId: string; roomCode?: string; source: string | null }) {
 		void this.persistence.recordConnection(payload.anonId, payload.socketId, payload.roomCode);
+		void this.persistence.upsertVisitor(payload.anonId, payload.source);
 	}
 
 	@OnEvent(PERSISTENCE_EVENTS.SOCKET_DISCONNECTED)

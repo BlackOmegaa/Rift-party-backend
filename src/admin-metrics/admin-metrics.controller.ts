@@ -7,9 +7,14 @@ import { AdminMetricsService } from "./admin-metrics.service";
 export class AdminMetricsController {
 	constructor(private readonly adminMetricsService: AdminMetricsService) {}
 
+	/** `from`/`to` en ISO 8601 ; le frontend calcule les bornes exactes selon le preset choisi (Aujourd'hui/Hier/7j/30j/Personnalise). Sans parametres : 30 derniers jours. */
 	@Get()
-	getSummary(@Query("days") days?: string) {
-		const parsed = days ? Number(days) : undefined;
-		return this.adminMetricsService.getSummary(parsed && parsed > 0 ? parsed : undefined);
+	getSummary(@Query("from") from?: string, @Query("to") to?: string) {
+		const parsedFrom = from ? new Date(from) : undefined;
+		const parsedTo = to ? new Date(to) : undefined;
+		return this.adminMetricsService.getSummary(
+			parsedFrom && !Number.isNaN(parsedFrom.getTime()) ? parsedFrom : undefined,
+			parsedTo && !Number.isNaN(parsedTo.getTime()) ? parsedTo : undefined,
+		);
 	}
 }

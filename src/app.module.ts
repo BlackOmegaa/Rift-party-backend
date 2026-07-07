@@ -22,6 +22,7 @@ import { AdminMetricsModule } from './admin-metrics/admin-metrics.module';
 import { EntitlementModule } from './entitlement/entitlement.module';
 import { PlayerAuthModule } from './player-auth/player-auth.module';
 import { BillingModule } from './billing/billing.module';
+import { TrackModule } from './track/track.module';
 
 @Module({
   imports: [
@@ -54,6 +55,7 @@ import { BillingModule } from './billing/billing.module';
     AdminMetricsModule,
     PlayerAuthModule,
     BillingModule,
+    TrackModule,
   ],
   controllers: [AppController],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],

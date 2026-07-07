@@ -35,7 +35,12 @@ export class BillingService {
 	 * pour l'y ramener apres coup au lieu de le rediriger de force vers /account
 	 * (sinon un joueur qui s'abonne en cours de partie se retrouve ejecte de sa room).
 	 */
-	async createCheckoutSession(userId: string, email: string, returnPath?: string): Promise<{ url: string }> {
+	async createCheckoutSession(
+		userId: string,
+		email: string,
+		returnPath?: string,
+		anonId?: string,
+	): Promise<{ url: string }> {
 		const stripe = this.requireStripe();
 		if (!this.priceId) throw new BadRequestException("STRIPE_PRICE_ID non configure.");
 
@@ -56,10 +61,20 @@ export class BillingService {
 			client_reference_id: userId,
 			success_url: `${this.frontendUrl}${safeReturnPath}?checkout=success`,
 			cancel_url: `${this.frontendUrl}${safeReturnPath}?checkout=cancelled`,
+			// anonId dans les metadata de session : c'est le seul canal pour que le
+			// webhook `checkout.session.completed` retrouve le visiteur analytics et
+			// donc sa source d'acquisition (funnel de conversion du dashboard).
+			metadata: { userId, anonId: anonId ?? "" },
 			subscription_data: { metadata: { userId } },
 		});
 
 		if (!session.url) throw new BadRequestException("Stripe n'a pas renvoye d'URL de session.");
+
+		// Pas fiable du funnel "parti vers Stripe" : enregistre serveur, jamais client.
+		await this.prisma.funnelEvent.create({
+			data: { kind: "SUBSCRIPTION", step: "CHECKOUT_STARTED", anonId: anonId ?? null, userId },
+		});
+
 		return { url: session.url };
 	}
 
@@ -103,6 +118,16 @@ export class BillingService {
 				const customerId = typeof session.customer === "string" ? session.customer : session.customer.id;
 				const subscription = await this.requireStripe().subscriptions.retrieve(subscriptionId);
 				await this.upsertSubscription(userId, customerId, subscription);
+				// Conversion confirmee par Stripe : derniere marche du funnel, avec
+				// l'anonId passe dans les metadata a la creation de la session.
+				await this.prisma.funnelEvent.create({
+					data: {
+						kind: "SUBSCRIPTION",
+						step: "COMPLETED",
+						anonId: session.metadata?.["anonId"] || null,
+						userId,
+					},
+				});
 				return;
 			}
 			case "customer.subscription.updated":

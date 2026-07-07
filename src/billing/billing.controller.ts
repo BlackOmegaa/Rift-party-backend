@@ -14,7 +14,7 @@ export class BillingController {
 		@Req() request: Request & { player?: PlayerJwtPayload },
 		@Body() dto: CheckoutSessionDto,
 	) {
-		return this.billingService.createCheckoutSession(request.player!.sub, request.player!.email, dto.returnPath);
+		return this.billingService.createCheckoutSession(request.player!.sub, request.player!.email, dto.returnPath, dto.anonId);
 	}
 
 	@Post("portal-session")

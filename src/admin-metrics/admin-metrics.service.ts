@@ -11,17 +11,34 @@ interface Period {
 }
 
 /**
+ * anonIds marques `Visitor.excluded` (appareils de l'equipe) et codes des
+ * rooms qu'ils ont creees : calcules une fois par requete de dashboard puis
+ * passes a chaque section. Les stats par visiteur filtrent sur `anonIds` ;
+ * les stats par room (rounds, matches, tailles) filtrent sur `roomCodes`
+ * (une room de test creee par l'admin est du bruit, meme si des inconnus
+ * l'ont rejointe).
+ */
+interface Exclusion {
+	anonIds: string[];
+	roomCodes: string[];
+}
+
+/**
  * KPI produit pour le dashboard admin, organises par les sections du roadmap
- * (acquisition / conversion / engagement / modes / retention / viralite).
- * Chaque section est une methode privee independante : ni le controller ni le
- * frontend n'ont a connaitre l'organisation interne des requetes, seulement
- * la forme du JSON retourne par `getSummary`.
+ * (acquisition / conversion / engagement / modes / retention / viralite /
+ * monetisation). Chaque section est une methode privee independante : ni le
+ * controller ni le frontend n'ont a connaitre l'organisation interne des
+ * requetes, seulement la forme du JSON retourne par `getSummary`.
  *
  * Choix de perf : les agregations simples passent par l'API Prisma
  * (groupBy/aggregate, deja indexees) ; les calculs qui melangent plusieurs
  * tables ou font de l'arithmetique de dates (duree de session, retention par
  * cohorte) passent par du SQL brut ($queryRaw) plutot que de rapatrier les
  * lignes en Node pour les recorreler a la main.
+ *
+ * Dans les requetes SQL brutes, l'exclusion des appareils de l'equipe passe
+ * par un NOT EXISTS sur Visitor.excluded (aucun parametre a injecter) ; dans
+ * les requetes Prisma, par un `notIn` sur la petite liste precalculee.
  */
 @Injectable()
 export class AdminMetricsService {
@@ -36,20 +53,24 @@ export class AdminMetricsService {
 			to: to ?? new Date(),
 		};
 
-		const [live, todayVsYesterday, acquisition, conversion, engagement, modes, retention, virality] =
+		const exclusion = await this.getExclusion();
+
+		const [live, todayVsYesterday, acquisition, conversion, engagement, modes, retention, virality, monetization] =
 			await Promise.all([
-				this.getLive(),
-				this.getTodayVsYesterday(),
+				this.getLive(exclusion),
+				this.getTodayVsYesterday(exclusion),
 				this.getAcquisition(period),
-				this.getConversion(period),
-				this.getEngagement(period),
-				this.getModes(period),
+				this.getConversion(period, exclusion),
+				this.getEngagement(period, exclusion),
+				this.getModes(period, exclusion),
 				this.getRetention(period),
-				this.getVirality(period),
+				this.getVirality(period, exclusion),
+				this.getMonetization(period, exclusion),
 			]);
 
 		return {
 			period: { from: period.from.toISOString(), to: period.to.toISOString() },
+			meta: { excludedVisitors: exclusion.anonIds.length },
 			live,
 			todayVsYesterday,
 			acquisition,
@@ -58,18 +79,46 @@ export class AdminMetricsService {
 			modes,
 			retention,
 			virality,
+			monetization,
 		};
+	}
+
+	/** Marque un appareil (anonId) comme appartenant a l'equipe : exclu de toutes les stats. */
+	async excludeVisitor(anonId: string) {
+		await this.prisma.visitor.upsert({
+			where: { anonId },
+			create: { anonId, excluded: true },
+			update: { excluded: true },
+		});
+		const totalExcluded = await this.prisma.visitor.count({ where: { excluded: true } });
+		return { excluded: true, totalExcluded };
+	}
+
+	private async getExclusion(): Promise<Exclusion> {
+		const excludedVisitors = await this.prisma.visitor.findMany({
+			where: { excluded: true },
+			select: { anonId: true },
+		});
+		const anonIds = excludedVisitors.map((v) => v.anonId);
+		if (!anonIds.length) return { anonIds: [], roomCodes: [] };
+
+		const hostedRooms = await this.prisma.roomJoin.findMany({
+			where: { isHost: true, anonId: { in: anonIds } },
+			select: { roomCode: true },
+			distinct: ["roomCode"],
+		});
+		return { anonIds, roomCodes: hostedRooms.map((r) => r.roomCode) };
 	}
 
 	// ---------------------------------------------------------------------
 	// Live (etat en memoire, pas de periode)
 	// ---------------------------------------------------------------------
 
-	private async getLive() {
+	private async getLive(exclusion: Exclusion) {
 		const { activeRooms, activePlayers } = this.roomsService.getLiveStats();
 		const dayAgo = new Date(Date.now() - DAY_MS);
 		const activeToday = await this.prisma.connectionEvent.findMany({
-			where: { type: "CONNECT", createdAt: { gte: dayAgo } },
+			where: { type: "CONNECT", createdAt: { gte: dayAgo }, anonId: { notIn: exclusion.anonIds } },
 			select: { anonId: true },
 			distinct: ["anonId"],
 		});
@@ -81,16 +130,16 @@ export class AdminMetricsService {
 	}
 
 	/** Comparaison jour calendaire vs veille, toujours relative a "maintenant" (independante du filtre de periode choisi dans le dashboard). */
-	private async getTodayVsYesterday() {
+	private async getTodayVsYesterday(exclusion: Exclusion) {
 		const now = new Date();
 		const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 		const yesterdayStart = new Date(todayStart.getTime() - DAY_MS);
 
 		const [activeUsersToday, activeUsersYesterday, newVisitorsToday, newVisitorsYesterday] = await Promise.all([
-			this.countDistinctAnonId({ type: "CONNECT", createdAt: { gte: todayStart } }),
-			this.countDistinctAnonId({ type: "CONNECT", createdAt: { gte: yesterdayStart, lt: todayStart } }),
-			this.prisma.visitor.count({ where: { firstSeenAt: { gte: todayStart } } }),
-			this.prisma.visitor.count({ where: { firstSeenAt: { gte: yesterdayStart, lt: todayStart } } }),
+			this.countDistinctAnonId({ type: "CONNECT", createdAt: { gte: todayStart } }, exclusion),
+			this.countDistinctAnonId({ type: "CONNECT", createdAt: { gte: yesterdayStart, lt: todayStart } }, exclusion),
+			this.prisma.visitor.count({ where: { firstSeenAt: { gte: todayStart }, excluded: false } }),
+			this.prisma.visitor.count({ where: { firstSeenAt: { gte: yesterdayStart, lt: todayStart }, excluded: false } }),
 		]);
 
 		return {
@@ -99,9 +148,12 @@ export class AdminMetricsService {
 		};
 	}
 
-	private async countDistinctAnonId(where: { type: "CONNECT"; createdAt: { gte: Date; lt?: Date } }) {
+	private async countDistinctAnonId(
+		where: { type: "CONNECT"; createdAt: { gte: Date; lt?: Date } },
+		exclusion: Exclusion,
+	) {
 		const rows = await this.prisma.connectionEvent.findMany({
-			where,
+			where: { ...where, anonId: { notIn: exclusion.anonIds } },
 			select: { anonId: true },
 			distinct: ["anonId"],
 		});
@@ -113,8 +165,13 @@ export class AdminMetricsService {
 	// ---------------------------------------------------------------------
 
 	private async getAcquisition(period: Period) {
-		const [uniqueVisitors, newVsReturning, dailySeries, bySource] = await Promise.all([
-			this.countDistinctAnonId({ type: "CONNECT", createdAt: { gte: period.from, lt: period.to } }),
+		const [uniqueRows, newVsReturning, dailySeries, bySource] = await Promise.all([
+			this.prisma.$queryRaw<{ unique_visitors: bigint }[]>`
+				SELECT COUNT(DISTINCT ce."anonId") AS unique_visitors
+				FROM "ConnectionEvent" ce
+				WHERE ce.type = 'CONNECT' AND ce."createdAt" BETWEEN ${period.from} AND ${period.to}
+				  AND NOT EXISTS (SELECT 1 FROM "Visitor" vx WHERE vx."anonId" = ce."anonId" AND vx."excluded")
+			`,
 			this.prisma.$queryRaw<{ new_count: bigint; returning_count: bigint }[]>`
 				SELECT
 					COUNT(DISTINCT ce."anonId") FILTER (WHERE v."firstSeenAt" >= ${period.from}) AS new_count,
@@ -122,6 +179,7 @@ export class AdminMetricsService {
 				FROM "ConnectionEvent" ce
 				LEFT JOIN "Visitor" v ON v."anonId" = ce."anonId"
 				WHERE ce.type = 'CONNECT' AND ce."createdAt" BETWEEN ${period.from} AND ${period.to}
+				  AND (v."anonId" IS NULL OR NOT v."excluded")
 			`,
 			this.prisma.$queryRaw<{ day: Date; unique_visitors: bigint; new_visitors: bigint }[]>`
 				SELECT
@@ -134,6 +192,7 @@ export class AdminMetricsService {
 				FROM "ConnectionEvent" ce
 				LEFT JOIN "Visitor" v ON v."anonId" = ce."anonId"
 				WHERE ce.type = 'CONNECT' AND ce."createdAt" BETWEEN ${period.from} AND ${period.to}
+				  AND (v."anonId" IS NULL OR NOT v."excluded")
 				GROUP BY 1
 				ORDER BY 1
 			`,
@@ -141,11 +200,13 @@ export class AdminMetricsService {
 				SELECT COALESCE(v."acquisitionSource", 'inconnu') AS source, COUNT(*) AS count
 				FROM "Visitor" v
 				WHERE v."firstSeenAt" BETWEEN ${period.from} AND ${period.to}
+				  AND NOT v."excluded"
 				GROUP BY 1
 				ORDER BY 2 DESC
 			`,
 		]);
 
+		const uniqueVisitors = Number(uniqueRows[0]?.unique_visitors ?? 0);
 		const newVisitors = Number(newVsReturning[0]?.new_count ?? 0);
 		const returningVisitors = Number(newVsReturning[0]?.returning_count ?? 0);
 		const sourceTotal = bySource.reduce((sum, row) => sum + Number(row.count), 0);
@@ -172,13 +233,25 @@ export class AdminMetricsService {
 	// Conversion
 	// ---------------------------------------------------------------------
 
-	private async getConversion(period: Period) {
+	private async getConversion(period: Period, exclusion: Exclusion) {
 		const dateFilter = { gte: period.from, lt: period.to };
 		const [roomsCreated, playersJoinedRows, gameStartedRows, uniqueVisitors] = await Promise.all([
-			this.prisma.room.count({ where: { createdAt: dateFilter } }),
-			this.prisma.roomJoin.findMany({ where: { createdAt: dateFilter }, select: { anonId: true }, distinct: ["anonId"] }),
-			this.prisma.gameSession.findMany({ where: { startedAt: dateFilter }, select: { anonId: true }, distinct: ["anonId"] }),
-			this.countDistinctAnonId({ type: "CONNECT", createdAt: { gte: period.from, lt: period.to } }),
+			// Compte via RoomJoin(isHost) plutot que Room : Room n'a pas d'anonId,
+			// impossible d'en exclure les rooms de test de l'equipe autrement.
+			this.prisma.roomJoin.count({
+				where: { createdAt: dateFilter, isHost: true, anonId: { notIn: exclusion.anonIds } },
+			}),
+			this.prisma.roomJoin.findMany({
+				where: { createdAt: dateFilter, anonId: { notIn: exclusion.anonIds } },
+				select: { anonId: true },
+				distinct: ["anonId"],
+			}),
+			this.prisma.gameSession.findMany({
+				where: { startedAt: dateFilter, anonId: { notIn: exclusion.anonIds } },
+				select: { anonId: true },
+				distinct: ["anonId"],
+			}),
+			this.countDistinctAnonId({ type: "CONNECT", createdAt: { gte: period.from, lt: period.to } }, exclusion),
 		]);
 
 		const playersJoined = playersJoinedRows.length;
@@ -196,20 +269,24 @@ export class AdminMetricsService {
 	// Engagement
 	// ---------------------------------------------------------------------
 
-	private async getEngagement(period: Period) {
+	private async getEngagement(period: Period, exclusion: Exclusion) {
 		const dateFilter = { gte: period.from, lt: period.to };
+		const roomFilter = { code: { notIn: exclusion.roomCodes } };
 
 		const [totalGamesPlayed, roomsCreated, avgPlayers, roomSizeRaw, matches, avgSessionRaw] = await Promise.all([
-			this.prisma.round.count({ where: { finishedAt: dateFilter } }),
-			this.prisma.room.count({ where: { createdAt: dateFilter } }),
-			this.prisma.room.aggregate({ where: { createdAt: dateFilter }, _avg: { maxPlayersReached: true } }),
+			this.prisma.round.count({ where: { finishedAt: dateFilter, match: { room: roomFilter } } }),
+			this.prisma.room.count({ where: { createdAt: dateFilter, ...roomFilter } }),
+			this.prisma.room.aggregate({
+				where: { createdAt: dateFilter, ...roomFilter },
+				_avg: { maxPlayersReached: true },
+			}),
 			this.prisma.room.groupBy({
 				by: ["maxPlayersReached"],
-				where: { createdAt: dateFilter },
+				where: { createdAt: dateFilter, ...roomFilter },
 				_count: { _all: true },
 			}),
 			this.prisma.match.findMany({
-				where: { finishedAt: { not: null, gte: period.from, lt: period.to } },
+				where: { finishedAt: { not: null, gte: period.from, lt: period.to }, room: roomFilter },
 				select: { startedAt: true, finishedAt: true },
 			}),
 			this.prisma.$queryRaw<{ avg_sec: number | null }[]>`
@@ -219,6 +296,7 @@ export class AdminMetricsService {
 				WHERE d.type = 'DISCONNECT'
 				  AND d."createdAt" BETWEEN ${period.from} AND ${period.to}
 				  AND d."createdAt" > c."createdAt"
+				  AND NOT EXISTS (SELECT 1 FROM "Visitor" vx WHERE vx."anonId" = d."anonId" AND vx."excluded")
 			`,
 		]);
 
@@ -247,18 +325,21 @@ export class AdminMetricsService {
 	// Modes de jeu
 	// ---------------------------------------------------------------------
 
-	private async getModes(period: Period) {
-		const dateFilter = { gte: period.from, lt: period.to };
+	private async getModes(period: Period, exclusion: Exclusion) {
+		const where = {
+			startedAt: { gte: period.from, lt: period.to },
+			anonId: { notIn: exclusion.anonIds },
+		};
 
 		const [byOutcome, byDuration] = await Promise.all([
 			this.prisma.gameSession.groupBy({
 				by: ["gameId", "outcome"],
-				where: { startedAt: dateFilter },
+				where,
 				_count: { _all: true },
 			}),
 			this.prisma.gameSession.groupBy({
 				by: ["gameId"],
-				where: { startedAt: dateFilter, durationSec: { not: null } },
+				where: { ...where, durationSec: { not: null } },
 				_avg: { durationSec: true },
 			}),
 		]);
@@ -326,6 +407,7 @@ export class AdminMetricsService {
 				) AS retained
 			FROM "Visitor" v
 			WHERE v."firstSeenAt" BETWEEN $1 AND $2
+			  AND NOT v."excluded"
 			`,
 			period.from,
 			period.to,
@@ -339,16 +421,87 @@ export class AdminMetricsService {
 	// Viralite
 	// ---------------------------------------------------------------------
 
-	private async getVirality(period: Period) {
+	private async getVirality(period: Period, exclusion: Exclusion) {
 		const dateFilter = { gte: period.from, lt: period.to };
 		const [invitesGenerated, joinedViaInvite] = await Promise.all([
-			this.prisma.inviteGenerated.count({ where: { createdAt: dateFilter } }),
-			this.prisma.roomJoin.count({ where: { createdAt: dateFilter, viaInvite: true } }),
+			this.prisma.inviteGenerated.count({
+				where: { createdAt: dateFilter, anonId: { notIn: exclusion.anonIds } },
+			}),
+			this.prisma.roomJoin.count({
+				where: { createdAt: dateFilter, viaInvite: true, anonId: { notIn: exclusion.anonIds } },
+			}),
 		]);
 		return {
 			invitesGenerated,
 			joinedViaInvite,
 			inviteToJoinRate: invitesGenerated ? joinedViaInvite / invitesGenerated : null,
+		};
+	}
+
+	// ---------------------------------------------------------------------
+	// Monetisation (funnel abonnement/donation + attribution des conversions)
+	// ---------------------------------------------------------------------
+
+	private async getMonetization(period: Period, exclusion: Exclusion) {
+		const dateFilter = { gte: period.from, lt: period.to };
+		// `notIn` ne matche jamais NULL, donc NOT(in) garde les events sans anonId
+		// (ex. checkout lance depuis un navigateur au localStorage vide) : voulu.
+		const notExcluded = exclusion.anonIds.length ? { NOT: { anonId: { in: exclusion.anonIds } } } : {};
+
+		const [steps, activeSubscribers, bySource] = await Promise.all([
+			this.prisma.funnelEvent.groupBy({
+				by: ["kind", "step"],
+				where: { createdAt: dateFilter, ...notExcluded },
+				_count: { _all: true },
+			}),
+			// Abonnes actifs MAINTENANT (pas de periode) : la derniere ligne
+			// Subscription active/trialing par user, non expiree.
+			this.prisma.$queryRaw<{ count: bigint }[]>`
+				SELECT COUNT(DISTINCT s."userId") AS count
+				FROM "Subscription" s
+				WHERE s.status IN ('active', 'trialing')
+				  AND (s."currentPeriodEnd" IS NULL OR s."currentPeriodEnd" > NOW())
+			`,
+			this.prisma.$queryRaw<
+				{ source: string; sub_clicks: bigint; sub_completed: bigint; donation_clicks: bigint }[]
+			>`
+				SELECT
+					COALESCE(v."acquisitionSource", 'inconnu') AS source,
+					COUNT(*) FILTER (WHERE fe.kind = 'SUBSCRIPTION' AND fe.step = 'CTA_CLICKED') AS sub_clicks,
+					COUNT(*) FILTER (WHERE fe.kind = 'SUBSCRIPTION' AND fe.step = 'COMPLETED') AS sub_completed,
+					COUNT(*) FILTER (WHERE fe.kind = 'DONATION' AND fe.step = 'CTA_CLICKED') AS donation_clicks
+				FROM "FunnelEvent" fe
+				LEFT JOIN "Visitor" v ON v."anonId" = fe."anonId"
+				WHERE fe."createdAt" BETWEEN ${period.from} AND ${period.to}
+				  AND (v."anonId" IS NULL OR NOT v."excluded")
+				GROUP BY 1
+				ORDER BY 3 DESC, 2 DESC
+			`,
+		]);
+
+		const count = (kind: "SUBSCRIPTION" | "DONATION", step: string) =>
+			steps
+				.filter((row) => row.kind === kind && row.step === step)
+				.reduce((sum, row) => sum + row._count._all, 0);
+
+		return {
+			activeSubscribers: Number(activeSubscribers[0]?.count ?? 0),
+			subscription: {
+				offerViewed: count("SUBSCRIPTION", "OFFER_VIEWED"),
+				ctaClicked: count("SUBSCRIPTION", "CTA_CLICKED"),
+				checkoutStarted: count("SUBSCRIPTION", "CHECKOUT_STARTED"),
+				checkoutCancelled: count("SUBSCRIPTION", "CHECKOUT_CANCELLED"),
+				completed: count("SUBSCRIPTION", "COMPLETED"),
+			},
+			donationClicks: count("DONATION", "CTA_CLICKED"),
+			bySource: bySource
+				.map((row) => ({
+					source: row.source,
+					subClicks: Number(row.sub_clicks),
+					subCompleted: Number(row.sub_completed),
+					donationClicks: Number(row.donation_clicks),
+				}))
+				.filter((row) => row.subClicks || row.subCompleted || row.donationClicks),
 		};
 	}
 }

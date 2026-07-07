@@ -6,4 +6,10 @@ export class CheckoutSessionDto {
 	@IsString()
 	@MaxLength(200)
 	returnPath?: string;
+
+	/** anonId analytics du visiteur, pour relier le paiement a sa source d'acquisition dans le funnel (voir FunnelEvent). */
+	@IsOptional()
+	@IsString()
+	@MaxLength(64)
+	anonId?: string;
 }

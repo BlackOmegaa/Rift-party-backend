@@ -166,6 +166,10 @@ model Visitor {
   lastSeenAt        DateTime @default(now())
   visitCount        Int      @default(1)
   acquisitionSource String?
+  /// Appareil de l'equipe (admin/dev) : marque a la connexion a la console
+  /// admin, exclu de TOUTES les metriques du dashboard pour ne pas fausser
+  /// les stats avec les tests internes.
+  excluded          Boolean  @default(false)
 
   @@index([firstSeenAt])
   @@index([lastSeenAt])
@@ -196,6 +200,37 @@ model InviteGenerated {
 
   @@index([roomCode])
   @@index([createdAt])
+}
+
+enum FunnelKind {
+  SUBSCRIPTION
+  DONATION
+}
+
+enum FunnelStep {
+  OFFER_VIEWED
+  CTA_CLICKED
+  CHECKOUT_STARTED
+  CHECKOUT_CANCELLED
+  COMPLETED
+}
+
+/// Un pas dans le funnel de monetisation (abonnement Supporter ou donation
+/// Ko-fi). Les pas cote client (offre vue, clic CTA, retour annule) arrivent
+/// par POST /track/funnel ; les pas fiables (checkout demarre, paiement
+/// confirme) sont enregistres cote serveur (BillingService + webhook Stripe,
+/// l'anonId transitant par les metadata de la session Checkout). La jointure
+/// anonId -> Visitor.acquisitionSource donne l'attribution des conversions.
+model FunnelEvent {
+  id        String     @id @default(uuid())
+  anonId    String?
+  userId    String?
+  kind      FunnelKind
+  step      FunnelStep
+  createdAt DateTime   @default(now())
+
+  @@index([kind, step, createdAt])
+  @@index([anonId])
 }
 
 enum GameSessionOutcome {

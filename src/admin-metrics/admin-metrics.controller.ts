@@ -1,6 +1,7 @@
-import { Controller, Get, Query, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Post, Query, UseGuards } from "@nestjs/common";
 import { AdminJwtGuard } from "../common/guards/admin-jwt.guard";
 import { AdminMetricsService } from "./admin-metrics.service";
+import { ExcludeVisitorDto } from "./dto/exclude-visitor.dto";
 
 @UseGuards(AdminJwtGuard)
 @Controller("admin/metrics")
@@ -16,5 +17,17 @@ export class AdminMetricsController {
 			parsedFrom && !Number.isNaN(parsedFrom.getTime()) ? parsedFrom : undefined,
 			parsedTo && !Number.isNaN(parsedTo.getTime()) ? parsedTo : undefined,
 		);
+	}
+
+	/**
+	 * Marque l'anonId de l'appareil COURANT de l'admin comme exclu des stats
+	 * (appele automatiquement par le dashboard a chaque ouverture) : les
+	 * appareils de l'equipe generent trop d'evenements de test et faussent
+	 * toutes les metriques. Route sous AdminJwtGuard : seul un admin connecte
+	 * peut exclure un appareil.
+	 */
+	@Post("exclude-me")
+	excludeMe(@Body() dto: ExcludeVisitorDto) {
+		return this.adminMetricsService.excludeVisitor(dto.anonId);
 	}
 }

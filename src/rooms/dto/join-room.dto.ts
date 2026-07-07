@@ -1,4 +1,4 @@
-import { IsBoolean, IsOptional, IsString, Length } from 'class-validator';
+import { IsBoolean, IsOptional, IsString, Length, MaxLength } from 'class-validator';
 
 export class JoinRoomDto {
   @IsString()
@@ -13,4 +13,10 @@ export class JoinRoomDto {
   @IsOptional()
   @IsBoolean()
   viaInvite?: boolean;
+
+  /** JWT du compte joueur (PlayerAuthService), optionnel : determine isSubscriber sur le Player. Ne bloque jamais l'arrivee si absent/invalide. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(400)
+  playerToken?: string;
 }

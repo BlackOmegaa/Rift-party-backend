@@ -5,11 +5,21 @@ import { PrismaService } from "../prisma/prisma.service";
 import { EntitlementService } from "../entitlement/entitlement.service";
 
 const SALT_ROUNDS = 12;
+/**
+ * Date de lancement des avantages Supporter visibles en jeu (aura, entree,
+ * contenu premium...). Les abonnes deja presents avant cette date obtiennent
+ * le badge distinct "Day One Supporter" - constante fixe, jamais recalculee.
+ */
+const DAY_ONE_CUTOFF = new Date("2026-07-08T00:00:00.000Z");
 
 export interface PlayerProfile {
 	id: string;
 	email: string;
 	isSubscriber: boolean;
+	/** Date du tout premier abonnement (MIN Subscription.createdAt), ISO 8601. Null si jamais abonne. */
+	supporterSince: string | null;
+	/** Vrai si le premier abonnement precede le lancement des avantages en jeu. */
+	isDayOneSupporter: boolean;
 }
 
 @Injectable()
@@ -51,7 +61,20 @@ export class PlayerAuthService {
 		const user = await this.prisma.user.findUnique({ where: { id: userId } });
 		if (!user || user.role !== "PLAYER") throw new UnauthorizedException("Compte introuvable.");
 		const isSubscriber = await this.entitlement.isSubscriber(user.id);
-		return { id: user.id, email: user.email, isSubscriber };
+		// Premier abonnement en date (pas le plus recent) : c'est l'anciennete
+		// reelle du soutien, meme si l'abonnement a ete interrompu puis repris.
+		const firstSubscription = await this.prisma.subscription.findFirst({
+			where: { userId },
+			orderBy: { createdAt: "asc" },
+		});
+		const supporterSince = firstSubscription?.createdAt ?? null;
+		return {
+			id: user.id,
+			email: user.email,
+			isSubscriber,
+			supporterSince: supporterSince?.toISOString() ?? null,
+			isDayOneSupporter: !!supporterSince && supporterSince < DAY_ONE_CUTOFF,
+		};
 	}
 
 	private async signToken(userId: string, email: string): Promise<{ token: string }> {

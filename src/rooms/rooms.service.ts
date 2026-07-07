@@ -47,7 +47,7 @@ export class RoomsService {
   /** socketId -> code de room, pour retrouver vite la room d'un socket qui se deconnecte */
   private socketToRoom = new Map<string, string>();
 
-  createRoom(hostSocketId: string, pseudo: string): Room {
+  createRoom(hostSocketId: string, pseudo: string, isSubscriber = false): Room {
     let code = generateRoomCode();
     while (this.rooms.has(code)) {
       code = generateRoomCode();
@@ -60,6 +60,7 @@ export class RoomsService {
       connected: true,
       score: 0,
       joinedAt: new Date().toISOString(),
+      isSubscriber,
     };
 
     const room: Room = {
@@ -80,7 +81,7 @@ export class RoomsService {
     return room;
   }
 
-  joinRoom(socketId: string, code: string, pseudo: string): Room {
+  joinRoom(socketId: string, code: string, pseudo: string, isSubscriber = false): Room {
     const room = this.rooms.get(code.toUpperCase());
     if (!room) {
       throw new Error('Room introuvable. Verifie le code.');
@@ -103,6 +104,7 @@ export class RoomsService {
       connected: true,
       score: 0,
       joinedAt: new Date().toISOString(),
+      isSubscriber,
     };
     room.players.push(player);
     if (becomingHost) room.hostId = socketId;

@@ -498,7 +498,7 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 				? room.players.find((p) => p.id === zero[0])?.pseudo
 				: null;
 			const summary = zeroName
-				? `${winnerName} prend la manche. ${zeroName} repart avec 0 point, downfall detecte.`
+				? `${winnerName} prend la manche. ${zeroName} repart avec 0 point, effondrement total.`
 				: `${winnerName} prend la manche avec ${sorted[0]?.[1].points ?? 0} pts.`;
 			const updated = this.roomsService.finishMixSegment(room.code, {
 				gameId: room.currentGameId,

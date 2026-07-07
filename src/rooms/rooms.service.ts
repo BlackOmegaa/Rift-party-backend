@@ -92,15 +92,20 @@ export class RoomsService {
       throw new Error('Ce pseudo est deja pris dans cette room.');
     }
 
+    // Room videe (tout le monde deconnecte) mais gardee en memoire le temps du
+    // delai de grace (voir RoomsGateway.scheduleEmptyRoomCleanup) : le premier
+    // a la rejoindre dans cette fenetre redevient host, puisqu'il n'y en a plus.
+    const becomingHost = room.players.length === 0;
     const player: Player = {
       id: socketId,
       pseudo,
-      isHost: false,
+      isHost: becomingHost,
       connected: true,
       score: 0,
       joinedAt: new Date().toISOString(),
     };
     room.players.push(player);
+    if (becomingHost) room.hostId = socketId;
     this.socketToRoom.set(socketId, room.code);
     return room;
   }
@@ -114,9 +119,13 @@ export class RoomsService {
     room.players = room.players.filter((p) => p.id !== socketId);
     this.socketToRoom.delete(socketId);
 
+    // Room videe : PAS de suppression immediate. Un reload de page en solo (ou
+    // un simple drop wifi) ne doit pas faire perdre la room a la seule
+    // personne dedans. RoomsGateway programme la suppression definitive apres
+    // un court delai de grace (voir scheduleEmptyRoomCleanup), annule si
+    // quelqu'un rejoint ce code entre-temps.
     if (room.players.length === 0) {
-      this.rooms.delete(code);
-      return undefined;
+      return room;
     }
 
     if (room.hostId === socketId) {
@@ -126,6 +135,11 @@ export class RoomsService {
     }
 
     return room;
+  }
+
+  /** Suppression definitive d'une room videe, appelee par RoomsGateway apres le delai de grace. */
+  deleteRoom(code: string): void {
+    this.rooms.delete(code.toUpperCase());
   }
 
   renamePlayer(socketId: string, pseudo: string): Room | undefined {

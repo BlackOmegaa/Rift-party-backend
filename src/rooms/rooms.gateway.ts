@@ -63,6 +63,14 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 	 */
 	private readonly segmentWatchdogs = new Map<string, NodeJS.Timeout>();
 	private readonly SEGMENT_TIMEOUT_MS = 180_000;
+	/**
+	 * Room videe (dernier joueur parti) : pas de suppression immediate, un
+	 * delai de grace laisse le temps a un reload de page (ou un drop wifi
+	 * d'une seconde) de rejoindre le meme code sans perdre la room. Annule des
+	 * qu'un JOIN arrive sur ce code (voir handleJoin).
+	 */
+	private readonly emptyRoomTimers = new Map<string, NodeJS.Timeout>();
+	private readonly EMPTY_ROOM_GRACE_MS = 20_000;
 
 	constructor(
 		private readonly roomsService: RoomsService,
@@ -99,7 +107,8 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 		this.anonIdBySocket.delete(client.id);
 
 		const room = this.roomsService.leaveRoom(client.id);
-		if (room) {
+		if (!room) return;
+		if (room.players.length > 0) {
 			this.server
 				.to(room.code)
 				.emit(ROOM_EVENTS.PLAYER_LEFT, { playerId: client.id });
@@ -110,9 +119,29 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 				roomCode: room.code,
 				playerId: client.id,
 			});
-		} else if (roomBefore) {
-			// leaveRoom() a retourne undefined : c'etait le dernier joueur, la room est fermee.
-			this.eventEmitter.emit(PERSISTENCE_EVENTS.ROOM_CLOSED, { roomCode: roomBefore.code });
+		} else {
+			// Room videe : delai de grace avant suppression definitive (voir
+			// scheduleEmptyRoomCleanup), pour survivre a un reload/drop wifi solo.
+			this.scheduleEmptyRoomCleanup(room.code);
+		}
+	}
+
+	/** Supprime la room pour de bon si personne ne l'a rejointe pendant le delai de grace. */
+	private scheduleEmptyRoomCleanup(roomCode: string): void {
+		this.clearEmptyRoomTimer(roomCode);
+		const timeout = setTimeout(() => {
+			this.emptyRoomTimers.delete(roomCode);
+			this.roomsService.deleteRoom(roomCode);
+			this.eventEmitter.emit(PERSISTENCE_EVENTS.ROOM_CLOSED, { roomCode });
+		}, this.EMPTY_ROOM_GRACE_MS);
+		this.emptyRoomTimers.set(roomCode, timeout);
+	}
+
+	private clearEmptyRoomTimer(roomCode: string): void {
+		const existing = this.emptyRoomTimers.get(roomCode);
+		if (existing) {
+			clearTimeout(existing);
+			this.emptyRoomTimers.delete(roomCode);
 		}
 	}
 
@@ -197,6 +226,8 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 				dto.code,
 				dto.pseudo?.trim() || "Joueur",
 			);
+			// Quelqu'un vient de (re)rejoindre ce code : plus besoin de la supprimer.
+			this.clearEmptyRoomTimer(room.code);
 			client.join(room.code);
 			const player = room.players.find((p) => p.id === client.id)!;
 			client.to(room.code).emit(ROOM_EVENTS.PLAYER_JOINED, player);
@@ -236,13 +267,14 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 		if (!room) return;
 		client.leave(room.code);
 		const updated = this.roomsService.leaveRoom(client.id);
+		if (!updated) return;
 		this.server
 			.to(room.code)
 			.emit(ROOM_EVENTS.PLAYER_LEFT, { playerId: client.id });
-		if (updated) {
+		if (updated.players.length > 0) {
 			this.server.to(room.code).emit(ROOM_EVENTS.STATE, updated);
 		} else {
-			this.eventEmitter.emit(PERSISTENCE_EVENTS.ROOM_CLOSED, { roomCode: room.code });
+			this.scheduleEmptyRoomCleanup(room.code);
 		}
 	}
 

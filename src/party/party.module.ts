@@ -23,7 +23,7 @@ const PARTY_GAMES = [
 		id: "fusion-champions",
 		label: "Fusion Champions",
 		description:
-			"Deux champions fusionnes en une seule carte. Devinez les deux noms le plus vite possible.",
+			"Deux champions fusionnes en une image (generee par IA). Devinez les deux noms le plus vite possible.",
 		minPlayers: 1,
 		maxPlayers: 12,
 	},

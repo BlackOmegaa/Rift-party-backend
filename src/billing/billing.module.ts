@@ -10,5 +10,7 @@ import { PlayerAuthModule } from "../player-auth/player-auth.module";
 	imports: [PlayerAuthModule],
 	controllers: [BillingController, BillingWebhookController],
 	providers: [BillingService],
+	// BillingService exporte pour AdminMetricsModule (revenus du mois via Stripe).
+	exports: [BillingService],
 })
 export class BillingModule {}

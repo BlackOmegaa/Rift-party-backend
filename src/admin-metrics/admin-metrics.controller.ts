@@ -1,7 +1,8 @@
-import { Body, Controller, Get, Post, Query, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from "@nestjs/common";
 import { AdminJwtGuard } from "../common/guards/admin-jwt.guard";
 import { AdminMetricsService } from "./admin-metrics.service";
 import { ExcludeVisitorDto } from "./dto/exclude-visitor.dto";
+import { BugReportStatusDto } from "./dto/bug-report-status.dto";
 
 @UseGuards(AdminJwtGuard)
 @Controller("admin/metrics")
@@ -29,5 +30,15 @@ export class AdminMetricsController {
 	@Post("exclude-me")
 	excludeMe(@Body() dto: ExcludeVisitorDto) {
 		return this.adminMetricsService.excludeVisitor(dto.anonId);
+	}
+
+	@Get("bug-reports")
+	getBugReports() {
+		return this.adminMetricsService.getBugReports();
+	}
+
+	@Patch("bug-reports/:id")
+	setBugReportStatus(@Param("id") id: string, @Body() dto: BugReportStatusDto) {
+		return this.adminMetricsService.setBugReportStatus(id, dto.status);
 	}
 }

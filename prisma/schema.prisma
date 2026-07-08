@@ -247,6 +247,28 @@ model FunnelEvent {
   @@index([anonId])
 }
 
+enum BugReportStatus {
+  OPEN
+  DONE
+}
+
+/// Signalement de bug/probleme envoye par un joueur depuis le bouton dedie
+/// (room). Contexte capture automatiquement cote client ; consulte et traite
+/// depuis la console admin (onglet Signalements).
+model BugReport {
+  id        String          @id @default(uuid())
+  message   String
+  pseudo    String?
+  roomCode  String?
+  gameId    String?
+  anonId    String?
+  page      String?
+  status    BugReportStatus @default(OPEN)
+  createdAt DateTime        @default(now())
+
+  @@index([status, createdAt])
+}
+
 enum GameSessionOutcome {
   COMPLETED
   ABANDONED

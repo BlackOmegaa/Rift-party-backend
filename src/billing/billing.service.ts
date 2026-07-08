@@ -94,6 +94,35 @@ export class BillingService {
 		return { url: session.url };
 	}
 
+	/**
+	 * Argent reellement encaisse sur le mois calendaire en cours (nouveaux
+	 * abonnements ET renouvellements) : somme des factures Stripe payees,
+	 * source de verite plutot qu'une estimation "abonnes x 3EUR" depuis la BDD.
+	 * Null tant que Stripe n'est pas configure (dev local sans cle).
+	 */
+	async getMonthRevenue(): Promise<{ amountCents: number; payments: number; currency: string } | null> {
+		if (!this.stripe) return null;
+		const now = new Date();
+		const monthStart = Math.floor(new Date(now.getFullYear(), now.getMonth(), 1).getTime() / 1000);
+
+		let amountCents = 0;
+		let payments = 0;
+		let currency = "eur";
+		// Pagination defensive (100 factures par page) : largement surdimensionne
+		// aujourd'hui, mais evite un plafond silencieux si le volume decolle.
+		for await (const invoice of this.stripe.invoices.list({
+			status: "paid",
+			created: { gte: monthStart },
+			limit: 100,
+		})) {
+			if (!invoice.amount_paid) continue;
+			amountCents += invoice.amount_paid;
+			payments += 1;
+			currency = invoice.currency ?? currency;
+		}
+		return { amountCents, payments, currency };
+	}
+
 	verifyWebhookSignature(rawBody: Buffer, signature: string): Stripe.Event {
 		const stripe = this.requireStripe();
 		const webhookSecret = this.config.get<string>("STRIPE_WEBHOOK_SECRET");

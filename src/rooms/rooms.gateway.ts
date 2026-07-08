@@ -111,6 +111,18 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 		}
 	}
 
+	/**
+	 * Sockets actuellement connectes (site ouvert, en room ou non), avec leur
+	 * anonId : permet au dashboard admin de compter les joueurs en ligne en
+	 * retirant les appareils de l'equipe (Visitor.excluded). Les bots detectes
+	 * sont ignores d'office, comme pour les evenements analytics.
+	 */
+	getOnlineSnapshot(): { socketId: string; anonId: string }[] {
+		return [...this.anonIdBySocket.entries()]
+			.filter(([socketId]) => !this.botSockets.has(socketId))
+			.map(([socketId, anonId]) => ({ socketId, anonId }));
+	}
+
 	handleConnection(client: Socket) {
 		const anonId = this.readAnonId(client);
 		this.anonIdBySocket.set(client.id, anonId);

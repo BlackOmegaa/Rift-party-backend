@@ -1,6 +1,8 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { RoomsService } from "../rooms/rooms.service";
+import { RoomsGateway } from "../rooms/rooms.gateway";
+import { BillingService } from "../billing/billing.service";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const ROOM_SIZE_BUCKETS = ["2", "3", "4", "5", "6+"] as const;
@@ -45,6 +47,8 @@ export class AdminMetricsService {
 	constructor(
 		private readonly prisma: PrismaService,
 		private readonly roomsService: RoomsService,
+		private readonly roomsGateway: RoomsGateway,
+		private readonly billing: BillingService,
 	) {}
 
 	async getSummary(from?: Date, to?: Date) {
@@ -83,6 +87,25 @@ export class AdminMetricsService {
 		};
 	}
 
+	/** Signalements des joueurs, plus recents d'abord (les ouverts avant les traites). */
+	async getBugReports() {
+		const reports = await this.prisma.bugReport.findMany({
+			orderBy: [{ status: "asc" }, { createdAt: "desc" }],
+			take: 200,
+		});
+		const openCount = await this.prisma.bugReport.count({ where: { status: "OPEN" } });
+		return { openCount, reports };
+	}
+
+	/** Bascule un signalement traite/a traiter depuis la console. */
+	async setBugReportStatus(id: string, status: "OPEN" | "DONE") {
+		try {
+			return await this.prisma.bugReport.update({ where: { id }, data: { status } });
+		} catch {
+			throw new NotFoundException("Signalement introuvable.");
+		}
+	}
+
 	/** Marque un appareil (anonId) comme appartenant a l'equipe : exclu de toutes les stats. */
 	async excludeVisitor(anonId: string) {
 		await this.prisma.visitor.upsert({
@@ -116,6 +139,12 @@ export class AdminMetricsService {
 
 	private async getLive(exclusion: Exclusion) {
 		const { activeRooms, activePlayers } = this.roomsService.getLiveStats();
+		// Joueurs en ligne = sockets connectes en ce moment (site ouvert, en room
+		// ou non), appareils de l'equipe retires. Compte les appareils distincts
+		// (anonId) : deux onglets du meme navigateur = un seul joueur.
+		const excludedSet = new Set(exclusion.anonIds);
+		const online = this.roomsGateway.getOnlineSnapshot().filter((s) => !excludedSet.has(s.anonId));
+		const onlinePlayersNow = new Set(online.map((s) => s.anonId)).size;
 		const dayAgo = new Date(Date.now() - DAY_MS);
 		const activeToday = await this.prisma.connectionEvent.findMany({
 			where: { type: "CONNECT", createdAt: { gte: dayAgo }, anonId: { notIn: exclusion.anonIds } },
@@ -123,6 +152,7 @@ export class AdminMetricsService {
 			distinct: ["anonId"],
 		});
 		return {
+			onlinePlayersNow,
 			activeRoomsNow: activeRooms,
 			activePlayersNow: activePlayers,
 			activeUsersToday: activeToday.length,
@@ -484,8 +514,15 @@ export class AdminMetricsService {
 				.filter((row) => row.kind === kind && row.step === step)
 				.reduce((sum, row) => sum + row._count._all, 0);
 
+		// Revenus du mois calendaire EN COURS (independant du filtre de periode,
+		// comme activeSubscribers) : question "combien j'ai gagne ce mois-ci ?".
+		// Un echec Stripe (reseau, cle revoquee...) ne doit pas casser tout le
+		// dashboard : la carte affiche juste "indisponible".
+		const monthRevenue = await this.billing.getMonthRevenue().catch(() => null);
+
 		return {
 			activeSubscribers: Number(activeSubscribers[0]?.count ?? 0),
+			monthRevenue,
 			subscription: {
 				offerViewed: count("SUBSCRIPTION", "OFFER_VIEWED"),
 				ctaClicked: count("SUBSCRIPTION", "CTA_CLICKED"),

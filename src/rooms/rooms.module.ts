@@ -9,6 +9,8 @@ import { PlayerAuthModule } from '../player-auth/player-auth.module';
   // (voir resolveIsSubscriber) sans redeclarer de config JWT.
   imports: [PlayerAuthModule],
   providers: [RoomsGateway, RoomsService],
-  exports: [RoomsService],
+  // RoomsGateway exporte pour AdminMetricsModule : snapshot des sockets
+  // connectes (joueurs en ligne), etat que seul le gateway connait.
+  exports: [RoomsService, RoomsGateway],
 })
 export class RoomsModule {}

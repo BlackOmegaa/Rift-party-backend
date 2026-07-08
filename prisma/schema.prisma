@@ -19,9 +19,11 @@ enum UserRole {
   PLAYER
 }
 
-/// Compte utilisateur. Deux roles : ADMIN (popup metriques) et PLAYER (compte
-/// joueur optionnel, sert uniquement a porter un abonnement a travers les
-/// sessions - jamais requis pour jouer, l'anonId reste le mode par defaut).
+/// Compte utilisateur. Role ADMIN = console metriques (le seul flux encore actif).
+/// Role PLAYER : ancien systeme de compte joueur/abonnement, retire cote applicatif
+/// (voir player-auth/billing/entitlement supprimes) mais laisse tel quel ici pour
+/// eviter une migration destructive sur des comptes reels existants en prod -
+/// nettoyage DB a faire separement, en connaissance de cause (voir memoire projet).
 model User {
   id           String    @id @default(uuid())
   email        String    @unique
@@ -30,16 +32,9 @@ model User {
   createdAt    DateTime  @default(now())
   lastLoginAt  DateTime?
 
-  /// Reinitialisation de mot de passe : hash SHA-256 du token envoye par
-  /// email (jamais le token en clair - une fuite de BDD ne permet pas de
-  /// reset). Un seul token actif a la fois, ecrase a chaque nouvelle demande.
   resetTokenHash      String?   @unique
   resetTokenExpiresAt DateTime?
 
-  /// Verification d'email NON bloquante (on peut jouer et s'abonner sans) :
-  /// email de bienvenue avec lien de confirmation a l'inscription, badge
-  /// "email non verifie" + renvoi possible depuis la page Compte. Meme
-  /// mecanique de token hashe que le reset de mot de passe.
   emailVerifiedAt      DateTime?
   verifyTokenHash      String?   @unique
   verifyTokenExpiresAt DateTime?
@@ -47,11 +42,8 @@ model User {
   subscriptions Subscription[]
 }
 
-/// Un abonnement Stripe (une ligne par cycle de vie d'abonnement Stripe, donc
-/// l'historique est conserve). Le service prend toujours la plus recente par
-/// userId pour determiner le statut actif. `status` reflete tel quel le champ
-/// Stripe (active/trialing/past_due/canceled/...), pas d'enum pour rester
-/// souple face aux valeurs Stripe qui peuvent evoluer.
+/// Ancien abonnement Stripe. Modele conserve tel quel (voir commentaire User) :
+/// plus ecrit par aucun code applicatif depuis la suppression de billing/entitlement.
 model Subscription {
   id                   String    @id @default(uuid())
   userId               String

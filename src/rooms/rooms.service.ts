@@ -15,8 +15,6 @@ const DEFAULT_ROUNDS_BY_GAME: Record<string, number> = {
   'undercover-champion': 1,
   'intrus': 10,
   'vote-party': 5,
-  'last-survivor': 1,
-  'qui-suis-je': 1,
   'croquis': 1,
 };
 
@@ -47,7 +45,7 @@ export class RoomsService {
   /** socketId -> code de room, pour retrouver vite la room d'un socket qui se deconnecte */
   private socketToRoom = new Map<string, string>();
 
-  createRoom(hostSocketId: string, pseudo: string, isSubscriber = false): Room {
+  createRoom(hostSocketId: string, pseudo: string): Room {
     // Plafond de securite memoire (l'etat est en RAM) : jamais atteint en usage
     // normal, ne sert qu'a borner un abus qui passerait le rate-limit par socket.
     if (this.rooms.size >= 5000) {
@@ -65,7 +63,6 @@ export class RoomsService {
       connected: true,
       score: 0,
       joinedAt: new Date().toISOString(),
-      isSubscriber,
     };
 
     const room: Room = {
@@ -86,7 +83,7 @@ export class RoomsService {
     return room;
   }
 
-  joinRoom(socketId: string, code: string, pseudo: string, isSubscriber = false): Room {
+  joinRoom(socketId: string, code: string, pseudo: string): Room {
     const room = this.rooms.get(code.toUpperCase());
     if (!room) {
       throw new Error('Room introuvable. Verifie le code.');
@@ -109,7 +106,6 @@ export class RoomsService {
       connected: true,
       score: 0,
       joinedAt: new Date().toISOString(),
-      isSubscriber,
     };
     room.players.push(player);
     if (becomingHost) room.hostId = socketId;

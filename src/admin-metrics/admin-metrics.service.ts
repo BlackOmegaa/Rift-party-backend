@@ -2,7 +2,6 @@ import { Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { RoomsService } from "../rooms/rooms.service";
 import { RoomsGateway } from "../rooms/rooms.gateway";
-import { BillingService } from "../billing/billing.service";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const ROOM_SIZE_BUCKETS = ["2", "3", "4", "5", "6+"] as const;
@@ -48,7 +47,6 @@ export class AdminMetricsService {
 		private readonly prisma: PrismaService,
 		private readonly roomsService: RoomsService,
 		private readonly roomsGateway: RoomsGateway,
-		private readonly billing: BillingService,
 	) {}
 
 	async getSummary(from?: Date, to?: Date) {
@@ -469,76 +467,47 @@ export class AdminMetricsService {
 	}
 
 	// ---------------------------------------------------------------------
-	// Monetisation (funnel abonnement/donation + attribution des conversions)
+	// Monetisation (funnel donation + attribution des conversions)
 	// ---------------------------------------------------------------------
 
 	private async getMonetization(period: Period, exclusion: Exclusion) {
 		const dateFilter = { gte: period.from, lt: period.to };
 		// `notIn` ne matche jamais NULL, donc NOT(in) garde les events sans anonId
-		// (ex. checkout lance depuis un navigateur au localStorage vide) : voulu.
+		// (ex. clic Ko-fi depuis un navigateur au localStorage vide) : voulu.
 		const notExcluded = exclusion.anonIds.length ? { NOT: { anonId: { in: exclusion.anonIds } } } : {};
 
-		const [steps, activeSubscribers, bySource] = await Promise.all([
+		const [steps, bySource] = await Promise.all([
 			this.prisma.funnelEvent.groupBy({
 				by: ["kind", "step"],
 				where: { createdAt: dateFilter, ...notExcluded },
 				_count: { _all: true },
 			}),
-			// Abonnes actifs MAINTENANT (pas de periode) : la derniere ligne
-			// Subscription active/trialing par user, non expiree.
-			this.prisma.$queryRaw<{ count: bigint }[]>`
-				SELECT COUNT(DISTINCT s."userId") AS count
-				FROM "Subscription" s
-				WHERE s.status IN ('active', 'trialing')
-				  AND (s."currentPeriodEnd" IS NULL OR s."currentPeriodEnd" > NOW())
-			`,
-			this.prisma.$queryRaw<
-				{ source: string; sub_clicks: bigint; sub_completed: bigint; donation_clicks: bigint }[]
-			>`
+			this.prisma.$queryRaw<{ source: string; donation_clicks: bigint }[]>`
 				SELECT
 					COALESCE(v."acquisitionSource", 'inconnu') AS source,
-					COUNT(*) FILTER (WHERE fe.kind = 'SUBSCRIPTION' AND fe.step = 'CTA_CLICKED') AS sub_clicks,
-					COUNT(*) FILTER (WHERE fe.kind = 'SUBSCRIPTION' AND fe.step = 'COMPLETED') AS sub_completed,
 					COUNT(*) FILTER (WHERE fe.kind = 'DONATION' AND fe.step = 'CTA_CLICKED') AS donation_clicks
 				FROM "FunnelEvent" fe
 				LEFT JOIN "Visitor" v ON v."anonId" = fe."anonId"
 				WHERE fe."createdAt" BETWEEN ${period.from} AND ${period.to}
 				  AND (v."anonId" IS NULL OR NOT v."excluded")
 				GROUP BY 1
-				ORDER BY 3 DESC, 2 DESC
+				ORDER BY 2 DESC
 			`,
 		]);
 
-		const count = (kind: "SUBSCRIPTION" | "DONATION", step: string) =>
+		const count = (kind: "DONATION", step: string) =>
 			steps
 				.filter((row) => row.kind === kind && row.step === step)
 				.reduce((sum, row) => sum + row._count._all, 0);
 
-		// Revenus du mois calendaire EN COURS (independant du filtre de periode,
-		// comme activeSubscribers) : question "combien j'ai gagne ce mois-ci ?".
-		// Un echec Stripe (reseau, cle revoquee...) ne doit pas casser tout le
-		// dashboard : la carte affiche juste "indisponible".
-		const monthRevenue = await this.billing.getMonthRevenue().catch(() => null);
-
 		return {
-			activeSubscribers: Number(activeSubscribers[0]?.count ?? 0),
-			monthRevenue,
-			subscription: {
-				offerViewed: count("SUBSCRIPTION", "OFFER_VIEWED"),
-				ctaClicked: count("SUBSCRIPTION", "CTA_CLICKED"),
-				checkoutStarted: count("SUBSCRIPTION", "CHECKOUT_STARTED"),
-				checkoutCancelled: count("SUBSCRIPTION", "CHECKOUT_CANCELLED"),
-				completed: count("SUBSCRIPTION", "COMPLETED"),
-			},
 			donationClicks: count("DONATION", "CTA_CLICKED"),
 			bySource: bySource
 				.map((row) => ({
 					source: row.source,
-					subClicks: Number(row.sub_clicks),
-					subCompleted: Number(row.sub_completed),
 					donationClicks: Number(row.donation_clicks),
 				}))
-				.filter((row) => row.subClicks || row.subCompleted || row.donationClicks),
+				.filter((row) => row.donationClicks),
 		};
 	}
 }

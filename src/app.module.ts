@@ -12,16 +12,11 @@ import { UndercoverModule } from './undercover/undercover.module';
 import { BrumeModule } from './brume/brume.module';
 import { LoldleModule } from './loldle/loldle.module';
 import { VotePartyModule } from './vote-party/vote-party.module';
-import { LastSurvivorModule } from './last-survivor/last-survivor.module';
-import { WhoamiModule } from './whoami/whoami.module';
 import { CroquisModule } from './croquis/croquis.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { PersistenceModule } from './persistence/persistence.module';
 import { AdminAuthModule } from './admin-auth/admin-auth.module';
 import { AdminMetricsModule } from './admin-metrics/admin-metrics.module';
-import { EntitlementModule } from './entitlement/entitlement.module';
-import { PlayerAuthModule } from './player-auth/player-auth.module';
-import { BillingModule } from './billing/billing.module';
 import { TrackModule } from './track/track.module';
 
 @Module({
@@ -38,7 +33,6 @@ import { TrackModule } from './track/track.module';
     // route /admin/login a sa propre limite plus stricte via @Throttle.
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 60 }]),
     PrismaModule,
-    EntitlementModule,
     RoomsModule,
     GamesModule,
     DraftModule,
@@ -47,14 +41,10 @@ import { TrackModule } from './track/track.module';
     BrumeModule,
     LoldleModule,
     VotePartyModule,
-    LastSurvivorModule,
-    WhoamiModule,
     CroquisModule,
     PersistenceModule,
     AdminAuthModule,
     AdminMetricsModule,
-    PlayerAuthModule,
-    BillingModule,
     TrackModule,
   ],
   controllers: [AppController],

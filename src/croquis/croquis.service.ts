@@ -137,16 +137,14 @@ export class CroquisService {
 		return this.drawingProgress(session);
 	}
 
-	/** Cloture la phase dessin et ouvre la galerie (dessins manquants ignores). Renvoie null si aucun dessin. */
+	/** Cloture la phase dessin et ouvre la galerie. Chaque joueur garde sa place meme sans dessin rendu a temps (image null, voir guessProgress/revealCurrent) : personne ne doit disparaitre silencieusement. Renvoie null si la session est vide. */
 	startGallery(roomCode: string): CroquisGalleryItem | null {
 		const session = this.sessions.get(roomCode);
 		if (!session) throw new Error('Aucune partie Croquis en cours.');
 		if (session.phaseTimeout) clearTimeout(session.phaseTimeout);
 
 		session.gallery = shuffle(
-			session.players
-				.filter((p) => p.image)
-				.map((p) => ({ artistId: p.id, artistPseudo: p.pseudo, champion: p.champion, image: p.image! })),
+			session.players.map((p) => ({ artistId: p.id, artistPseudo: p.pseudo, champion: p.champion, image: p.image })),
 		);
 		if (!session.gallery.length) return null;
 
@@ -362,7 +360,8 @@ export class CroquisService {
 
 	private guessProgress(session: CroquisSession): { guessedCount: number; expectedCount: number; allGuessed: boolean } {
 		const entry = session.gallery[session.galleryIndex];
-		const expectedCount = session.players.filter((p) => p.id !== entry.artistId).length;
+		// Pas de dessin rendu a temps : rien a deviner, on ne bloque pas la room dessus (voir noGuesserExpected).
+		const expectedCount = entry.image ? session.players.filter((p) => p.id !== entry.artistId).length : 0;
 		const guessedCount = session.guesses.size;
 		return { guessedCount, expectedCount, allGuessed: guessedCount >= expectedCount };
 	}

@@ -10,10 +10,7 @@ import {
 } from "@nestjs/websockets";
 import { Server, Socket } from "socket.io";
 import { EventEmitter2, OnEvent } from "@nestjs/event-emitter";
-import { JwtService } from "@nestjs/jwt";
 import { RoomsService } from "./rooms.service";
-import { EntitlementService } from "../entitlement/entitlement.service";
-import { PlayerJwtPayload } from "../common/guards/player-jwt.guard";
 import {
 	PARTY_EVENTS,
 	ROOM_EVENTS,
@@ -111,26 +108,8 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 	constructor(
 		private readonly roomsService: RoomsService,
 		private readonly eventEmitter: EventEmitter2,
-		private readonly jwtService: JwtService,
-		private readonly entitlement: EntitlementService,
 		private readonly gamesRegistry: GamesRegistryService,
 	) {}
-
-	/**
-	 * Statut Supporter au moment du CREATE/JOIN, a partir d'un JWT optionnel
-	 * (compte joueur, systeme separe de l'anonId de room). Ne leve JAMAIS
-	 * d'exception : un token absent, expire ou force ne doit jamais empecher
-	 * de creer/rejoindre une room, il retombe simplement sur `false`.
-	 */
-	private async resolveIsSubscriber(token?: string): Promise<boolean> {
-		if (!token) return false;
-		try {
-			const payload = await this.jwtService.verifyAsync<PlayerJwtPayload>(token);
-			return await this.entitlement.isSubscriber(payload.sub);
-		} catch {
-			return false;
-		}
-	}
 
 	/**
 	 * Sockets actuellement connectes (site ouvert, en room ou non), avec leur
@@ -316,11 +295,9 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 			// proprement d'abord (sinon l'ancienne room garde un joueur fantome
 			// jamais nettoye et le mapping socketToRoom est ecrase).
 			this.forceLeaveCurrentRoom(client);
-			const isSubscriber = await this.resolveIsSubscriber(dto.playerToken);
 			const room = this.roomsService.createRoom(
 				client.id,
 				dto.pseudo?.trim() || "Joueur",
-				isSubscriber,
 			);
 			client.join(room.code);
 			client.emit(ROOM_EVENTS.STATE, room);
@@ -346,12 +323,10 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 			// room a la fois (voir forceLeaveCurrentRoom). Ne fait rien si le
 			// socket n'est dans aucune room (cas normal).
 			this.forceLeaveCurrentRoom(client);
-			const isSubscriber = await this.resolveIsSubscriber(dto.playerToken);
 			const room = this.roomsService.joinRoom(
 				client.id,
 				dto.code,
 				dto.pseudo?.trim() || "Joueur",
-				isSubscriber,
 			);
 			// Quelqu'un vient de (re)rejoindre ce code : plus besoin de la supprimer.
 			this.clearEmptyRoomTimer(room.code);
@@ -1203,8 +1178,7 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 			gameId === "tiktok-ranking" ||
 			gameId === "undercover-champion" ||
 			gameId === "brume" ||
-			gameId === "loldle" ||
-			gameId === "last-survivor"
+			gameId === "loldle"
 		)
 			return 1;
 		return 3;

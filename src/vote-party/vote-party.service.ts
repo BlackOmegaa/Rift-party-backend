@@ -85,7 +85,7 @@ export class VotePartyService {
 		return this.sessions.get(roomCode)?.phase;
 	}
 
-	/** Enregistre le vote (irrevocable, pas de self-vote). Renvoie l'avancement pour le broadcast. */
+	/** Enregistre le vote (irrevocable). Renvoie l'avancement pour le broadcast. */
 	submitVote(
 		roomCode: string,
 		voterId: string,
@@ -100,9 +100,6 @@ export class VotePartyService {
 		}
 		if (session.votes.has(voterId)) {
 			throw new Error('Tu as deja vote pour cette question.');
-		}
-		if (targetId === voterId) {
-			throw new Error('Impossible de voter pour soi-meme.');
 		}
 		if (targetId !== null && !session.players.some((p) => p.id === targetId)) {
 			throw new Error('Ce joueur ne fait pas partie de la manche.');

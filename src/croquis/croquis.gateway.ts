@@ -17,8 +17,7 @@ const GAME_ID = 'croquis';
 
 /**
  * Gateway du mini-jeu "Croquis". Le champion a dessiner est PERSONNEL et
- * secret pour les autres : START est emis socket par socket (meme convention
- * que WhoamiGateway), le reste est broadcast.
+ * secret pour les autres : START est emis socket par socket, le reste est broadcast.
  */
 @WebSocketGateway({ cors: { origin: ALLOWED_ORIGINS, credentials: true } })
 export class CroquisGateway {

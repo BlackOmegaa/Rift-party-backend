@@ -101,32 +101,6 @@ export const VOTE_PARTY_EVENTS = {
   STATE: 'voteparty:state',
 } as const;
 
-export const LAST_SURVIVOR_EVENTS = {
-  START: 'lastsurvivor:start',
-  VOTE: 'lastsurvivor:vote',
-  VOTE_PROGRESS: 'lastsurvivor:vote-progress',
-  ROUND_RESULT: 'lastsurvivor:round-result',
-  NEXT: 'lastsurvivor:next',
-  ROUND: 'lastsurvivor:round',
-  RESULTS: 'lastsurvivor:results',
-  REQUEST_STATE: 'lastsurvivor:request-state',
-  STATE: 'lastsurvivor:state',
-} as const;
-
-export const WHOAMI_EVENTS = {
-  START: 'whoami:start',
-  ANSWER: 'whoami:answer',
-  ANSWER_PROGRESS: 'whoami:answer-progress',
-  TURN: 'whoami:turn',
-  NEXT_QUESTION: 'whoami:next-question',
-  PASS: 'whoami:pass',
-  GUESS: 'whoami:guess',
-  GUESS_RESULT: 'whoami:guess-result',
-  RESULTS: 'whoami:results',
-  REQUEST_STATE: 'whoami:request-state',
-  STATE: 'whoami:state',
-} as const;
-
 export const CROQUIS_EVENTS = {
   START: 'croquis:start',
   SUBMIT_DRAWING: 'croquis:submit-drawing',

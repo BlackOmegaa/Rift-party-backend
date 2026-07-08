@@ -36,6 +36,14 @@ model User {
   resetTokenHash      String?   @unique
   resetTokenExpiresAt DateTime?
 
+  /// Verification d'email NON bloquante (on peut jouer et s'abonner sans) :
+  /// email de bienvenue avec lien de confirmation a l'inscription, badge
+  /// "email non verifie" + renvoi possible depuis la page Compte. Meme
+  /// mecanique de token hashe que le reset de mot de passe.
+  emailVerifiedAt      DateTime?
+  verifyTokenHash      String?   @unique
+  verifyTokenExpiresAt DateTime?
+
   subscriptions Subscription[]
 }
 

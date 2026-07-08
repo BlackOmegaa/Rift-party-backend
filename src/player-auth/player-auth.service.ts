@@ -10,6 +10,9 @@ import { ALLOWED_ORIGINS } from "../common/constants/cors.constants";
 
 const SALT_ROUNDS = 12;
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1h : assez pour ouvrir sa boite mail, court en cas de fuite.
+// 7 jours : la verification n'est pas bloquante, inutile de presser les gens ;
+// expire quand meme pour qu'un vieux lien qui traine ne reste pas valide a vie.
+const VERIFY_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /**
  * Date de lancement des avantages Supporter visibles en jeu (aura, entree,
  * contenu premium...). Les abonnes deja presents avant cette date obtiennent
@@ -20,6 +23,8 @@ const DAY_ONE_CUTOFF = new Date("2026-07-08T00:00:00.000Z");
 export interface PlayerProfile {
 	id: string;
 	email: string;
+	/** Vrai si l'adresse a ete confirmee via le lien envoye par email (jamais bloquant). */
+	emailVerified: boolean;
 	isSubscriber: boolean;
 	/** Date du tout premier abonnement (MIN Subscription.createdAt), ISO 8601. Null si jamais abonne. */
 	supporterSince: string | null;
@@ -51,7 +56,35 @@ export class PlayerAuthService {
 			data: { email, passwordHash, role: "PLAYER" },
 		});
 
+		// Email de bienvenue avec lien de confirmation - non bloquant : le compte
+		// est cree et connecte meme si l'envoi echoue (MailService ne jette jamais).
+		await this.sendVerificationEmail(user.id, user.email);
+
 		return this.signToken(user.id, user.email);
+	}
+
+	/** Confirme l'adresse email via le token recu. Fonctionne connecte ou non (le token identifie le compte). */
+	async verifyEmail(token: string): Promise<void> {
+		const user = await this.prisma.user.findUnique({
+			where: { verifyTokenHash: this.hashToken(token) },
+		});
+		if (!user || !user.verifyTokenExpiresAt || user.verifyTokenExpiresAt < new Date()) {
+			throw new BadRequestException(
+				"Lien invalide ou expiré. Renvoie un email de confirmation depuis ta page Compte.",
+			);
+		}
+		await this.prisma.user.update({
+			where: { id: user.id },
+			data: { emailVerifiedAt: new Date(), verifyTokenHash: null, verifyTokenExpiresAt: null },
+		});
+	}
+
+	/** Renvoie l'email de confirmation (bouton de la page Compte). No-op si deja verifie. */
+	async resendVerification(userId: string): Promise<void> {
+		const user = await this.prisma.user.findUnique({ where: { id: userId } });
+		if (!user || user.role !== "PLAYER") throw new UnauthorizedException("Compte introuvable.");
+		if (user.emailVerifiedAt) return;
+		await this.sendVerificationEmail(user.id, user.email);
 	}
 
 	async login(email: string, password: string): Promise<{ token: string }> {
@@ -83,6 +116,7 @@ export class PlayerAuthService {
 		return {
 			id: user.id,
 			email: user.email,
+			emailVerified: !!user.emailVerifiedAt,
 			isSubscriber,
 			supporterSince: supporterSince?.toISOString() ?? null,
 			isDayOneSupporter: !!supporterSince && supporterSince < DAY_ONE_CUTOFF,
@@ -143,6 +177,45 @@ export class PlayerAuthService {
 
 	private hashToken(token: string): string {
 		return createHash("sha256").update(token).digest("hex");
+	}
+
+	private async sendVerificationEmail(userId: string, email: string): Promise<void> {
+		const token = randomBytes(32).toString("hex");
+		await this.prisma.user.update({
+			where: { id: userId },
+			data: {
+				verifyTokenHash: this.hashToken(token),
+				verifyTokenExpiresAt: new Date(Date.now() + VERIFY_TOKEN_TTL_MS),
+			},
+		});
+		const link = `${this.frontendUrl}/verify-email?token=${token}`;
+		await this.mail.send(
+			email,
+			"Bienvenue sur Rift Party — confirme ton adresse",
+			this.verifyEmailHtml(link),
+			`Bienvenue sur Rift Party !\n\n` +
+				`Ton compte est actif : tu peux deja jouer et t'abonner sans rien confirmer.\n` +
+				`Confirmer ton adresse permet simplement de recuperer ton compte en cas de mot de passe oublie.\n\n` +
+				`Pour confirmer, ouvre ce lien (valable 7 jours) :\n${link}\n\n` +
+				`Si tu n'as pas cree de compte sur riftparty.com, ignore simplement cet email.`,
+		);
+	}
+
+	private verifyEmailHtml(link: string): string {
+		return `
+<div style="font-family: Arial, Helvetica, sans-serif; max-width: 480px; margin: 0 auto; color: #1a1a2e;">
+	<h2 style="color: #0a1428;">Rift <span style="color: #c8aa6e;">Party</span></h2>
+	<p>Bienvenue ! Ton compte est actif : tu peux déjà jouer et t'abonner sans rien confirmer.</p>
+	<p>Confirmer ton adresse permet simplement de récupérer ton compte si tu oublies ton mot de passe un jour.</p>
+	<p style="text-align: center; margin: 28px 0;">
+		<a href="${link}" style="background: #c8aa6e; color: #0a1428; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold;">
+			Confirmer mon adresse
+		</a>
+	</p>
+	<p style="font-size: 13px; color: #555;">Ce lien est valable 7 jours. Si le bouton ne fonctionne pas, copie cette adresse dans ton navigateur :<br/>
+	<a href="${link}" style="color: #785a28; word-break: break-all;">${link}</a></p>
+	<p style="font-size: 13px; color: #555;">Si tu n'as pas créé de compte sur riftparty.com, ignore simplement cet email.</p>
+</div>`;
 	}
 
 	private resetEmailHtml(link: string): string {

@@ -4,6 +4,8 @@ import { Request } from "express";
 import { PlayerAuthService } from "./player-auth.service";
 import { RegisterDto } from "./dto/register.dto";
 import { LoginDto } from "./dto/login.dto";
+import { ForgotPasswordDto } from "./dto/forgot-password.dto";
+import { ResetPasswordDto } from "./dto/reset-password.dto";
 import { PlayerJwtGuard, PlayerJwtPayload } from "../common/guards/player-jwt.guard";
 
 @Controller("player-auth")
@@ -21,6 +23,21 @@ export class PlayerAuthController {
 	@Post("login")
 	login(@Body() dto: LoginDto) {
 		return this.playerAuthService.login(dto.email, dto.password);
+	}
+
+	// Limite stricte : chaque appel declenche potentiellement un envoi d'email
+	// (spam + quota Resend). La reponse est toujours 200, email connu ou non.
+	@Throttle({ default: { limit: 3, ttl: 15 * 60_000 } })
+	@Post("forgot-password")
+	async forgotPassword(@Body() dto: ForgotPasswordDto) {
+		await this.playerAuthService.forgotPassword(dto.email);
+		return { ok: true };
+	}
+
+	@Throttle({ default: { limit: 5, ttl: 60_000 } })
+	@Post("reset-password")
+	resetPassword(@Body() dto: ResetPasswordDto) {
+		return this.playerAuthService.resetPassword(dto.token, dto.password);
 	}
 
 	@UseGuards(PlayerJwtGuard)

@@ -30,6 +30,12 @@ model User {
   createdAt    DateTime  @default(now())
   lastLoginAt  DateTime?
 
+  /// Reinitialisation de mot de passe : hash SHA-256 du token envoye par
+  /// email (jamais le token en clair - une fuite de BDD ne permet pas de
+  /// reset). Un seul token actif a la fois, ecrase a chaque nouvelle demande.
+  resetTokenHash      String?   @unique
+  resetTokenExpiresAt DateTime?
+
   subscriptions Subscription[]
 }
 

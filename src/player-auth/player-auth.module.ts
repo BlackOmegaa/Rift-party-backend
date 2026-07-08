@@ -4,9 +4,11 @@ import { ConfigModule, ConfigService } from "@nestjs/config";
 import { PlayerAuthController } from "./player-auth.controller";
 import { PlayerAuthService } from "./player-auth.service";
 import { PlayerJwtGuard } from "../common/guards/player-jwt.guard";
+import { MailModule } from "../mail/mail.module";
 
 @Module({
 	imports: [
+		MailModule,
 		// Module JWT independant de AdminAuthModule (meme JWT_SECRET, duree de
 		// vie differente : 30j pour un compte joueur casual vs 12h pour l'admin).
 		JwtModule.registerAsync({

@@ -20,6 +20,16 @@ export class PersistenceService {
 	/** code de room -> id Prisma du Match courant (cree paresseusement au premier round). */
 	private readonly matchIdByCode = new Map<string, Promise<string>>();
 
+	/**
+	 * ANALYTICS_EXCLUDE_ALL=true (backend/.env local UNIQUEMENT, jamais en prod) :
+	 * le backend de dev ecrit dans la meme BDD que la prod, donc chaque visiteur
+	 * vu par CE backend est marque `excluded` d'office - meme mecanisme que le
+	 * bouton "exclure cet appareil" de la console admin, mais automatique. Les
+	 * navigateurs de test (Claude inclus) regenerent des anonId a la volee : les
+	 * exclure a la source est le seul flaggage fiable.
+	 */
+	private readonly excludeAll = process.env.ANALYTICS_EXCLUDE_ALL === "true";
+
 	constructor(private readonly prisma: PrismaService) {}
 
 	async recordRoomCreated(room: Room): Promise<void> {
@@ -118,8 +128,20 @@ export class PersistenceService {
 			const now = new Date();
 			await this.prisma.visitor.upsert({
 				where: { anonId },
-				create: { anonId, firstSeenAt: now, lastSeenAt: now, acquisitionSource: source },
-				update: { lastSeenAt: now, visitCount: { increment: 1 } },
+				create: {
+					anonId,
+					firstSeenAt: now,
+					lastSeenAt: now,
+					acquisitionSource: source,
+					excluded: this.excludeAll,
+				},
+				// En mode exclusion, l'update re-marque aussi les visiteurs existants :
+				// un anonId de test deja present en base finit flagge des sa prochaine visite.
+				update: {
+					lastSeenAt: now,
+					visitCount: { increment: 1 },
+					...(this.excludeAll ? { excluded: true } : {}),
+				},
 			});
 		} catch (err) {
 			this.logger.warn(`upsertVisitor(${anonId}) a echoue : ${(err as Error).message}`);

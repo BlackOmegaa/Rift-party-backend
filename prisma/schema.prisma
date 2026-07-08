@@ -269,6 +269,23 @@ model BugReport {
   @@index([status, createdAt])
 }
 
+/// Resultat d'une fusion devinee (mini-jeu Fusion Champions). UNE ligne par
+/// couple (anonId, fusionId) : on ne garde que la PREMIERE exposition d'un
+/// joueur a une fusion donnee (les revoyures n'ecrasent pas le resultat), pour
+/// un "% de joueurs qui ont trouve" honnete, non gonfle par les habitues.
+/// `fusionId` = id de la fusion (ex. "ahri-evelynn"), `found` = les deux
+/// champions trouves du premier coup.
+model FusionResult {
+  id        String   @id @default(uuid())
+  anonId    String
+  fusionId  String
+  found     Boolean
+  createdAt DateTime @default(now())
+
+  @@unique([anonId, fusionId])
+  @@index([fusionId])
+}
+
 enum GameSessionOutcome {
   COMPLETED
   ABANDONED

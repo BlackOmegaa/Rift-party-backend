@@ -26,9 +26,13 @@ export class PlayerJwtGuard implements CanActivate {
 
 		try {
 			const payload = await this.jwtService.verifyAsync<PlayerJwtPayload>(token);
+			// Symetrique d'AdminJwtGuard : meme JWT_SECRET pour les deux roles, donc
+			// on refuse explicitement un token ADMIN sur une route joueur.
+			if (payload.role !== "PLAYER") throw new UnauthorizedException("Token joueur requis.");
 			request.player = payload;
 			return true;
-		} catch {
+		} catch (err) {
+			if (err instanceof UnauthorizedException) throw err;
 			throw new UnauthorizedException("Token invalide ou expire.");
 		}
 	}

@@ -11,6 +11,13 @@ async function bootstrap() {
 	const app = await NestFactory.create(AppModule, { rawBody: true });
 	app.useGlobalPipes(new ValidationPipe({ whitelist: true }));
 
+	// Derriere le proxy Railway : sans ceci, req.ip = IP du proxy pour TOUT le
+	// monde, donc un seul compteur de throttle partage (un attaquant epuiserait
+	// la limite admin-login/register pour tous les joueurs, et des amis sur le
+	// meme reseau se bloqueraient mutuellement). trust proxy=1 fait lire l'IP
+	// reelle du client dans X-Forwarded-For -> throttle vraiment par-IP.
+	app.getHttpAdapter().getInstance().set("trust proxy", 1);
+
 	app.enableCors({
 		origin: ALLOWED_ORIGINS,
 		credentials: true,

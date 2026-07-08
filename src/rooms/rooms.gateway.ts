@@ -22,6 +22,26 @@ import { PERSISTENCE_EVENTS } from "../common/constants/internal-events.constant
 import { CreateRoomDto } from "./dto/create-room.dto";
 import { JoinRoomDto } from "./dto/join-room.dto";
 import { Room } from "./interfaces/room.interface";
+import { GamesRegistryService } from "../games/games.registry";
+
+/**
+ * Jeux "generiques" sans gateway dedie : leur seule condition de fin est le
+ * quorum de soumissions (party:segment-complete). En Party Mix le watchdog
+ * d'inactivite les couvre deja ; lances SEULS (standalone, hors mix) ils
+ * n'avaient aucun timer serveur, donc un client fige mais toujours connecte
+ * bloquait le lobby a vie. On arme le meme watchdog pour eux hors mix. Les
+ * jeux a gateway dedie (undercover, draft, brume...) ont leurs propres timers
+ * de phase et ne doivent PAS etre coupes par ce chemin generique. tiktok-ranking
+ * est volontairement absent : sa phase tribunal est menee par l'host (qui garde
+ * son bouton "Retour lobby") et son cycle a deux temps se prete mal a une
+ * cloture forcee generique - le filet est le bouton d'echappement cote client.
+ */
+const WATCHDOG_STANDALONE_GAMES = new Set([
+	"guess-champion",
+	"fusion-champions",
+	"turret-tank",
+	"intrus",
+]);
 
 @WebSocketGateway({ cors: { origin: ALLOWED_ORIGINS, credentials: true } })
 export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
@@ -93,6 +113,7 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 		private readonly eventEmitter: EventEmitter2,
 		private readonly jwtService: JwtService,
 		private readonly entitlement: EntitlementService,
+		private readonly gamesRegistry: GamesRegistryService,
 	) {}
 
 	/**
@@ -435,6 +456,9 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 	) {
 		try {
 			const room = this.roomsService.endGame(client.id, dto.summary);
+			// Fin manuelle (bouton host / echappement spectateur) : desarme le
+			// watchdog pour eviter un force-finish fantome sur une manche deja close.
+			this.clearSegmentWatchdog(room.code);
 			const lastRound = room.roundHistory[room.roundHistory.length - 1];
 			this.server.to(room.code).emit(ROOM_EVENTS.ROUND_FINISHED, lastRound);
 			this.server.to(room.code).emit(ROOM_EVENTS.STATE, room);
@@ -449,6 +473,18 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 		@MessageBody() dto: { gameId: string; forceEvent?: string },
 	) {
 		try {
+			// Garde-fou serveur du minPlayers (le client le filtre deja, mais rien
+			// n'empeche un socket bricole de lancer un jeu 8-min en solo -> partie
+			// degeneree). Verifie AVANT de basculer la room en in-game.
+			const roomBefore = this.roomsService.getRoomBySocket(client.id);
+			const minPlayers = this.gamesRegistry.get(dto.gameId)?.minPlayers ?? 1;
+			if (roomBefore && roomBefore.players.length < minPlayers) {
+				client.emit(ROOM_EVENTS.ERROR, {
+					message: `Ce jeu demande au moins ${minPlayers} joueurs.`,
+				});
+				return;
+			}
+
 			const room = this.roomsService.startGame(client.id, dto.gameId);
 			this.server
 				.to(room.code)
@@ -462,6 +498,16 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 				forceEvent: dto.forceEvent,
 				players: this.playerRefs(room),
 			});
+			// Jeux generiques lances seuls, A PARTIR DE 2 JOUEURS : arme le filet
+			// anti-blocage (voir WATCHDOG_STANDALONE_GAMES). A 1 joueur il n'y a
+			// aucun quorum a attendre (sa soumission cloture direct), donc pas de
+			// watchdog - sinon une partie solo lente (score calcule cote client,
+			// zero message socket) se ferait couper a tort a 180s. Le filet ne sert
+			// que quand plusieurs joueurs s'attendent. Les jeux a gateway dedie ont
+			// deja leurs propres timers de phase.
+			if (WATCHDOG_STANDALONE_GAMES.has(dto.gameId) && room.players.length >= 2) {
+				this.armSegmentWatchdog(room.code);
+			}
 		} catch (err) {
 			client.emit(ROOM_EVENTS.ERROR, { message: (err as Error).message });
 		}
@@ -1057,21 +1103,20 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 	private forceFinishStuckSegment(roomCode: string): void {
 		this.segmentWatchdogs.delete(roomCode);
 		const room = this.roomsService.getRoom(roomCode);
-		if (
-			!room ||
-			!room.activeMix ||
-			room.activeMix.status !== "running" ||
-			!room.currentGameId
-		)
-			return;
+		if (!room || !room.currentGameId) return;
+		// Un Party Mix en pause/termine n'a rien a forcer. Sinon on couvre les
+		// deux cas : segment de mix en cours OU jeu generique lance seul (activeMix
+		// null, cursor conventionnel "solo", meme cle que handleSegmentComplete).
+		if (room.activeMix && room.activeMix.status !== "running") return;
+		const cursor = room.activeMix?.cursor ?? "solo";
 
 		const gameId = room.currentGameId;
 		if (gameId === "tiktok-ranking") {
-			this.forceFinishStuckTiktokSegment(room.code, room.activeMix.cursor);
+			this.forceFinishStuckTiktokSegment(room.code, cursor);
 			return;
 		}
 
-		const key = `${room.code}:${room.activeMix.cursor}:${gameId}`;
+		const key = `${room.code}:${cursor}:${gameId}`;
 		const submissions =
 			this.genericSegmentSubmissions.get(key) ??
 			new Map<string, { points: number; summary: string }>();
@@ -1105,7 +1150,7 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 	 * le scoring. Score neutre (0) pour tout le monde : mieux vaut debloquer le
 	 * lobby que figer 15 manches de Party Mix pour un joueur inactif.
 	 */
-	private forceFinishStuckTiktokSegment(roomCode: string, cursor: number): void {
+	private forceFinishStuckTiktokSegment(roomCode: string, cursor: number | string): void {
 		const room = this.roomsService.getRoom(roomCode);
 		if (
 			!room ||
